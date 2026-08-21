@@ -2,20 +2,31 @@
 
 > **Phase 1 objective:** Build and refine the complete SyncWeave visual system and user workflow before implementing real networking or filesystem synchronization.
 
-For this phase, all networking, peer discovery, authentication, file comparison, and transfers are mocked/faked. The goal is to make the application feel correct before connecting it to real infrastructure.
+All networking, peer discovery, authentication, file comparison, and transfers are mocked/faked during Phase 1. The goal is to make the product experience correct before connecting real infrastructure.
 
 ## 0. Locked Architecture Decision
 
 **OpenTUI + TypeScript is the sole UI foundation for SyncWeave.**
 
-Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework into the SyncWeave UI implementation. The application and mock-service architecture must remain renderer-independent enough that real filesystem/network implementations can replace the mocks later without requiring a UI rewrite.
+OpenTUI provides the terminal rendering, component/layout primitives, input handling, and UI runtime. SyncWeave must not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework.
+
+OpenTUI is a native Zig core with TypeScript bindings and provides a component-oriented architecture suitable for the visual, interactive TUI we are building. The upstream project also provides a dedicated agent skill/documentation source that should be consulted when implementing unfamiliar OpenTUI APIs. urlOpenTUI repositoryhttps://github.com/anomalyco/opentui
 
 ### Phase 1 stack
 
-- **OpenTUI** — terminal rendering, layout, components, input, scrolling, and UI interaction.
+- **OpenTUI** — rendering, layout, components, keyboard/mouse input, scrolling, and animation.
 - **TypeScript** — application and UI implementation.
+- **Bun** — development/runtime/package management.
 - **Mock domain/services** — fake filesystem, peers, pairing, diffs, and transfers.
-- **Real networking/filesystem** — explicitly deferred until the Phase 1 UX is approved.
+- **Real networking/filesystem** — explicitly deferred until the UX is approved.
+
+### Explicitly excluded
+
+- [x] Bubble Tea — not used.
+- [x] Lip Gloss — not used.
+- [x] Ratatui — not used.
+- [x] Real networking — deferred.
+- [x] Real filesystem synchronization — deferred.
 
 ### Architectural boundary
 
@@ -43,436 +54,310 @@ Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework into t
                  └───────────┘
 ```
 
-The UI should consume application state rather than reaching directly into mock services. Later, real filesystem and networking implementations can satisfy the same domain/service interfaces.
+The UI should consume application state rather than reaching directly into future network/filesystem implementations. The current prototype keeps mock data local to the application while we establish the visual model; extraction into dedicated domain/service modules is an upcoming task.
 
 ---
 
-## 1. Technology & UI Foundation
+# 1. Technology & Project Foundation
 
 - [x] Lock OpenTUI as the sole TUI framework.
 - [x] Lock TypeScript as the UI/application implementation language.
-- [ ] Establish the initial OpenTUI project structure.
-- [ ] Define a clean separation between:
-  - UI components
-  - Application state
-  - User interactions
-  - Mock services
-  - Future filesystem/network services
-- [ ] Establish a central application state model that can eventually accommodate real peers, files, transfers, and synchronization state.
-- [ ] Ensure the UI architecture does not require rewriting the interface when mocked services are replaced with real implementations.
-- [ ] Establish initial development/build/run commands.
-- [ ] Add a minimal smoke test or startup validation.
-
-### Explicitly excluded
-
-- [x] Bubble Tea — **not used**.
-- [x] Lip Gloss — **not used**.
-- [x] Ratatui — **not used**.
-- [x] Real networking — **deferred**.
-- [x] Real filesystem synchronization — **deferred**.
+- [x] Establish initial project structure.
+- [x] Add `package.json` with OpenTUI dependency.
+- [x] Add TypeScript configuration.
+- [x] Add Bun development/start scripts.
+- [x] Establish an initial OpenTUI entry point at `src/main.ts`.
+- [ ] Establish dedicated modules for UI components.
+- [ ] Establish dedicated application-state module.
+- [ ] Establish dedicated mock-service modules.
+- [ ] Establish interfaces separating UI/domain state from future real services.
+- [ ] Add a formal typecheck/CI validation step.
+- [ ] Add a minimal automated startup/smoke test.
 
 ---
 
-## 2. Visual Design System
+# 2. Visual Design System
 
-### Color & Theme
+## Color & Theme
 
-- [ ] Implement the SyncWeave color palette.
-- [ ] Define semantic colors rather than hard-coding colors throughout components.
-- [ ] Implement:
-  - [ ] Background
-  - [ ] Elevated surfaces
-  - [ ] Primary accent
-  - [ ] Remote/peer accent
-  - [ ] Success
-  - [ ] Warning / modified
-  - [ ] Error / deleted
-  - [ ] Muted / synchronized
-  - [ ] Focused state
+- [x] Establish initial SyncWeave semantic color tokens in the prototype.
+- [x] Implement background color.
+- [x] Implement elevated surface color.
+- [x] Implement Electric Cyan focus accent.
+- [x] Implement Violet remote-peer accent.
+- [x] Implement success/mint state.
+- [x] Implement warning/modified state.
+- [x] Implement error/deleted state.
+- [x] Implement muted/synchronized state.
+- [x] Implement focused-row state.
+- [ ] Extract design tokens into a dedicated theme module.
 - [ ] Define typography hierarchy.
-- [ ] Define consistent spacing/padding rules.
-- [ ] Define border styles and panel treatments.
-- [ ] Define selected, focused, disabled, loading, and inactive states.
-- [ ] Create a reusable component/style vocabulary.
+- [ ] Define consistent spacing/padding tokens.
+- [ ] Define reusable border styles.
+- [ ] Define disabled/loading/inactive states.
 
-### Terminal Rendering
+## Terminal Rendering
 
-- [ ] Implement rounded SyncWeave panel borders.
-- [ ] Implement Unicode glyph support.
-- [ ] Implement Nerd Font icons where available.
-- [ ] Implement ASCII fallback icons.
-- [ ] Verify rendering in standard terminal environments.
-- [ ] Test rendering in Termux.
-- [ ] Test rendering at different terminal widths.
-- [ ] Avoid relying on glyphs that render incorrectly on common Android fonts.
+- [x] Use Unicode state glyphs.
+- [x] Use Nerd Font file icons in the prototype.
+- [ ] Add ASCII icon fallback.
+- [ ] Verify rendering across common desktop terminals.
+- [ ] Verify rendering in Termux.
+- [ ] Verify narrow terminal rendering.
+- [ ] Audit glyph compatibility with Android terminal fonts.
 
 ---
 
-## 3. Main Application Shell
+# 3. Main Application Shell
 
-- [ ] Build the main SyncWeave application frame.
-- [ ] Implement the top status/header bar.
-- [ ] Implement the central workspace.
-- [ ] Implement the bottom action rail.
-- [ ] Implement responsive resizing.
-- [ ] Ensure the entire interface can be navigated without a mouse.
-- [ ] Ensure important actions can also be triggered through touch/click interaction where supported.
-
-### Header
-
-- [ ] Display SyncWeave version.
-- [ ] Display local connection/discovery status.
-- [ ] Display peer count.
-- [ ] Display connection/activity indicator.
-- [ ] Implement the mDNS heartbeat visual as a **mock status indicator**.
-- [ ] Make connection status visually understandable without relying exclusively on text.
-
-### Footer
-
-- [ ] Implement contextual keyboard shortcuts.
-- [ ] Display available actions based on current application state.
-- [ ] Make action labels visually distinct.
-- [ ] Ensure footer actions correspond to actual interactive handlers.
-- [ ] Support:
-  - [ ] Select
-  - [ ] Sync
-  - [ ] Diff
-  - [ ] QR / Pair
-  - [ ] Help
-  - [ ] Cancel / Back where appropriate
+- [x] Build the main SyncWeave application frame.
+- [x] Build the top status/header bar.
+- [x] Build the central workspace.
+- [x] Build the activity/transfer status area.
+- [x] Build the bottom action rail.
+- [x] Display SyncWeave version.
+- [x] Display mock mDNS status.
+- [x] Display mock peer count.
+- [ ] Add animated mDNS heartbeat.
+- [ ] Add dynamic contextual footer actions.
+- [ ] Add responsive resizing behavior.
 
 ---
 
-## 4. Dual-Pane Workspace
+# 4. Dual-Pane Workspace
 
-Build the primary SyncWeave experience around the dual-pane filesystem interface.
+## Local Pane
 
-### Local Pane
-
-- [ ] Display local workspace name/path.
-- [ ] Display files and directories.
-- [ ] Display file icons.
-- [ ] Display file sizes.
-- [ ] Display synchronization state.
-- [ ] Display selection state.
-- [ ] Implement keyboard navigation.
-- [ ] Implement mouse/touch selection where supported.
-- [ ] Implement scrolling.
+- [x] Display local workspace path.
+- [x] Display local files.
+- [x] Display file icons.
+- [x] Display file sizes.
+- [x] Display synchronization state.
+- [x] Display selection state.
+- [x] Implement keyboard navigation.
 - [ ] Implement directory navigation.
+- [ ] Implement scrolling for larger datasets.
+- [ ] Implement mouse/touch selection.
 
-### Remote Pane
+## Remote Pane
 
-- [ ] Display remote peer name.
-- [ ] Display remote path.
-- [ ] Display remote filesystem.
-- [ ] Display remote file metadata.
-- [ ] Implement the same navigation model as the local pane.
-- [ ] Visually distinguish remote state from local state.
+- [x] Display remote peer name.
+- [x] Display remote path.
+- [x] Display remote mock filesystem.
+- [x] Display remote metadata.
+- [x] Visually distinguish remote state.
+- [x] Implement independent cursor state.
 
-### Pane Interaction
+## Pane Interaction
 
-- [ ] Implement pane focus.
-- [ ] Implement `Tab` pane switching.
-- [ ] Implement focused border animation.
-- [ ] Implement synchronized navigation where appropriate.
-- [ ] Make the currently active pane unmistakable.
-- [ ] Implement selection independent of focus.
-- [ ] Test keyboard navigation thoroughly.
+- [x] Implement pane focus.
+- [x] Implement `Tab` pane switching.
+- [x] Visually highlight focused pane.
+- [x] Implement synchronized UI state updates after navigation.
+- [x] Implement independent selection per pane.
+- [ ] Add animated focus transition.
+- [ ] Add mouse/touch pane switching.
 
 ---
 
-## 5. Mock Filesystem
+# 5. Mock Filesystem
 
-Before implementing real filesystem/network functionality, create a deterministic fake filesystem.
+The Phase 1 filesystem is deterministic and entirely fake.
 
-- [ ] Create mock local files.
-- [ ] Create mock remote files.
-- [ ] Support directories.
-- [ ] Support file metadata.
-- [ ] Support different file sizes.
-- [ ] Support file states:
-  - [ ] Identical
-  - [ ] Added
-  - [ ] Modified
-  - [ ] Deleted
-  - [ ] Conflict
-- [ ] Allow navigation through the mock filesystem.
-- [ ] Allow selection of files.
-- [ ] Allow multiple files to be staged.
-- [ ] Make the mock data sufficiently realistic to exercise the UI.
+- [x] Create mock local files.
+- [x] Create mock remote files.
+- [x] Include realistic filenames and paths.
+- [x] Include file sizes.
+- [x] Include synchronization states.
+- [x] Support multiple selectable files.
+- [ ] Add explicit directory nodes.
+- [ ] Add directory traversal.
+- [ ] Add richer metadata.
+- [ ] Add configurable mock scenarios.
 
-Example mock workspace:
+Current scenario includes:
 
 ```text
 ~/projects/notes/
 
 ├── architecture-diagram.md
 ├── daily-todo.txt
-├── README.md
 ├── configs/
-│   ├── termux.properties
-│   └── shell.conf
 └── build-artifact.tar.gz
 ```
 
 ---
 
-## 6. Synchronization State Visualization
+# 6. Synchronization State Visualization
 
-Build the visual language for synchronization before implementing synchronization itself.
-
-- [ ] Implement identical/synced state.
-- [ ] Implement added state.
-- [ ] Implement modified state.
-- [ ] Implement deleted state.
-- [ ] Implement conflict state.
-- [ ] Define consistent icons for each state.
-- [ ] Define consistent colors for each state.
-- [ ] Define state transitions.
+- [x] Synced/identical state.
+- [x] Added/new state.
+- [x] Modified/diverged state.
+- [x] Deleted/missing state type defined.
+- [x] State glyphs.
+- [x] Semantic state colors.
+- [x] State visible directly in file rows.
+- [ ] Add conflict state.
 - [ ] Ensure states remain understandable without color.
-- [ ] Add contextual explanations through help/tooltips where appropriate.
+- [ ] Add state legend/help.
+- [ ] Implement state transition animations.
 
 ---
 
-## 7. File Selection & Staging Workflow
+# 7. File Selection & Staging Workflow
 
-Build the complete staging experience using mock data.
-
-- [ ] Implement `Space` to select/deselect files.
-- [ ] Implement multi-file selection.
-- [ ] Implement select all.
-- [ ] Implement deselect all.
-- [ ] Visually distinguish:
-  - Focused
-  - Selected
-  - Modified
-  - Staged
-- [ ] Create a staged-transfer summary.
-- [ ] Show the number of files selected.
+- [x] `Space` selects/deselects the focused file.
+- [x] Multi-file selection.
+- [x] Visual selection checkmark.
+- [x] Staged/unstaged status feedback.
+- [x] Aggregate selected-file count for mock sync action.
+- [x] Prevent sync action when nothing is staged.
+- [ ] Select all.
+- [ ] Deselect all.
 - [ ] Show aggregate transfer size.
-- [ ] Prevent accidental synchronization when nothing is selected.
-- [ ] Create confirmation UX where appropriate.
+- [ ] Add staged-transfer review UI.
+- [ ] Add explicit confirmation flow.
 
 ---
 
-## 8. Mock Transfer Experience
+# 8. Mock Transfer Experience
 
-**No real network transfer yet.**
+**No real network transfer is implemented yet.**
 
-Create a convincing simulated transfer engine.
-
-- [ ] Create fake transfer jobs.
-- [ ] Simulate transfer initialization.
+- [ ] Create a dedicated mock transfer service.
+- [ ] Create transfer jobs.
+- [ ] Simulate initialization.
 - [ ] Simulate chunk progression.
-- [ ] Simulate transfer speed.
+- [ ] Simulate speed.
 - [ ] Simulate ETA.
-- [ ] Simulate multiple files transferring.
+- [ ] Simulate multiple files.
 - [ ] Simulate completion.
 - [ ] Simulate failure.
 - [ ] Simulate cancellation.
 - [ ] Simulate retry.
-- [ ] Simulate concurrent transfers.
-- [ ] Keep the simulation deterministic enough for UI testing.
+- [ ] Implement animated transfer activity.
+- [ ] Implement Braille progress gauge.
+- [ ] Implement transfer queue.
 
-### Transfer Visualization
-
-- [ ] Implement progress percentage.
-- [ ] Implement Braille progress visualization.
-- [ ] Implement transfer speed.
-- [ ] Implement ETA.
-- [ ] Display active filename.
-- [ ] Display chunk information.
-- [ ] Implement transfer activity animation.
-- [ ] Implement completed-transfer state.
-- [ ] Implement failed-transfer state.
-- [ ] Implement cancellation state.
+Current `s` behavior is deliberately only a **mock queue/status placeholder**. It does not transfer data.
 
 ---
 
-## 9. Transfer Queue
-
-Create a dedicated conceptual model for transfers.
-
-- [ ] Implement queued state.
-- [ ] Implement active state.
-- [ ] Implement completed state.
-- [ ] Implement failed state.
-- [ ] Implement cancelled state.
-- [ ] Display multiple queued transfers.
-- [ ] Allow users to inspect the queue.
-- [ ] Allow cancellation of active transfers.
-- [ ] Allow retrying failed transfers.
-- [ ] Show aggregate progress.
-
----
-
-## 10. Mock Peer Discovery
+# 9. Mock Peer Discovery
 
 **No actual mDNS or rendezvous networking yet.**
 
-Create simulated peers.
-
-- [ ] Create mock peer objects.
+- [ ] Create mock peer model.
 - [ ] Simulate peer discovery.
-- [ ] Simulate peer appearing.
-- [ ] Simulate peer disappearing.
+- [ ] Simulate peer appearance.
+- [ ] Simulate peer disappearance.
 - [ ] Simulate connection establishment.
 - [ ] Simulate connection failure.
 - [ ] Simulate reconnecting.
-- [ ] Display peer status.
 - [ ] Display peer capabilities.
-- [ ] Display peer name and platform.
-- [ ] Test multiple peers.
+- [ ] Support multiple peer selection.
+- [ ] Add peer status animations.
 
-Example:
-
-```text
-Peers
-
-● MacBook-M3       Online
-● Pixel-10-Pro     Online
-○ Home-Server      Offline
-```
+Current header displays a static mock peer state only.
 
 ---
 
-## 11. QR Pairing Workflow
+# 10. QR Pairing Workflow
 
-Build the entire pairing UX using mocked authentication.
-
-- [ ] Implement pairing modal.
-- [ ] Implement terminal QR rendering.
-- [ ] Implement QR half-block rendering.
-- [ ] Implement pairing code display.
+- [ ] Create pairing modal.
+- [ ] Integrate OpenTUI QR support.
+- [ ] Render terminal QR code.
+- [ ] Display pairing code.
 - [ ] Display connection method.
 - [ ] Display authentication state.
-- [ ] Display waiting for peer.
+- [ ] Display waiting-for-peer state.
 - [ ] Simulate successful pairing.
-- [ ] Simulate pairing failure.
-- [ ] Simulate cancellation.
-- [ ] Implement `Esc` to cancel.
-- [ ] Create success transition.
-- [ ] Create failure/retry transition.
+- [ ] Simulate failure.
+- [ ] Simulate timeout.
+- [ ] Implement retry.
+- [ ] Implement cancellation.
 
-### Pairing States
-
-```text
-IDLE
-  ↓
-PAIRING_MODAL
-  ↓
-WAITING_FOR_PEER
-  ↓
-AUTHENTICATING
-  ↓
-CONNECTED
-```
-
-Failure paths should also be represented in the UI:
-
-```text
-WAITING_FOR_PEER
-       ↓
-    TIMEOUT
-       ↓
-   RETRY / CANCEL
-```
+Current `q` action is only a placeholder indicating that the mock pairing UI is next.
 
 ---
 
-## 12. Diff Inspector
+# 11. Diff Inspector
 
-Build the complete diff experience using mock files.
-
-- [ ] Implement `d` keyboard shortcut.
-- [ ] Create fullscreen diff modal.
-- [ ] Implement side-by-side diff.
+- [ ] Implement `d` action as an actual modal.
+- [ ] Build fullscreen/split diff view.
+- [ ] Implement mock side-by-side content.
 - [ ] Implement line numbers.
 - [ ] Implement added lines.
 - [ ] Implement removed lines.
 - [ ] Implement modified sections.
 - [ ] Implement syntax highlighting.
 - [ ] Implement synchronized scrolling.
-- [ ] Implement change-hunk navigation.
-- [ ] Implement `Tab` between hunks.
-- [ ] Implement selected-hunk state.
-- [ ] Mock hunk staging.
-- [ ] Implement `Enter` to stage a hunk.
-- [ ] Implement `Esc` to close the diff.
+- [ ] Implement hunk navigation.
+- [ ] Implement hunk selection.
+- [ ] Implement mock hunk staging.
+- [ ] Implement `Esc` dismissal.
 
-The real diff engine can replace the mock diff provider later.
+Current `d` action only updates the activity status as a workflow placeholder.
 
 ---
 
-## 13. Responsive / Mobile UX
+# 12. Responsive / Mobile UX
 
-Treat narrow terminals as a first-class interface rather than a broken desktop layout.
+## Wide — ≥90 columns
 
-### Wide Layout — ≥90 Columns
+- [x] Establish dual-pane layout as the desktop target.
+- [ ] Add full metadata/breadcrumb treatment.
+- [ ] Add responsive sizing rules.
 
-- [ ] Dual-pane workspace.
-- [ ] Full metadata.
-- [ ] Full breadcrumbs.
-- [ ] Transfer information.
-- [ ] Full footer action rail.
+## Narrow — <90 columns
 
-### Narrow Layout — <90 Columns
-
-- [ ] Collapse into a single active pane.
-- [ ] Implement `[Local] | [Remote]` tabs.
-- [ ] Display active peer in the tab.
+- [ ] Collapse to single active pane.
+- [ ] Add `[Local] | [Remote]` tabs.
 - [ ] Preserve file state indicators.
-- [ ] Preserve selection.
-- [ ] Preserve primary actions.
+- [ ] Preserve selection and primary actions.
 - [ ] Reduce metadata density.
 
-### Very Narrow / Soft Keyboard
+## Very Narrow / Soft Keyboard
 
-- [ ] Detect available viewport height.
+- [ ] Detect reduced viewport dimensions.
 - [ ] Collapse unnecessary headers.
-- [ ] Collapse breadcrumbs when necessary.
-- [ ] Preserve maximum file-list height.
-- [ ] Ensure footer remains accessible.
-- [ ] Ensure essential actions remain reachable.
+- [ ] Collapse breadcrumbs.
+- [ ] Preserve file-list height.
+- [ ] Preserve essential actions.
 
 ---
 
-## 14. Touch & Mouse Interaction
+# 13. Touch & Mouse Interaction
 
-- [ ] Implement mouse support through OpenTUI input handling.
+- [ ] Implement OpenTUI mouse handling.
 - [ ] Normalize primary click behavior.
-- [ ] Allow clicking file rows.
-- [ ] Allow clicking action buttons.
-- [ ] Allow clicking pane tabs.
-- [ ] Allow clicking modal controls.
-- [ ] Ensure touch targets have adequate terminal-cell size.
-- [ ] Test interaction under Termux.
-- [ ] Ensure keyboard interaction remains the primary fallback.
+- [ ] Click file rows to focus/select.
+- [ ] Click action controls.
+- [ ] Click pane tabs.
+- [ ] Click modal controls.
+- [ ] Validate terminal touch behavior in Termux.
+- [ ] Keep keyboard controls fully functional as the fallback.
 
 ---
 
-## 15. Animation System
+# 14. Animation System
 
-Implement animations as reusable UI primitives rather than one-off effects.
+Animations must be event-driven and should not create unnecessary CPU/battery load while idle.
 
-- [ ] Create an event-driven animation/tick system appropriate to OpenTUI.
-- [ ] Avoid continuously rendering when the application is idle.
-- [ ] Pause unnecessary animation when inactive.
-- [ ] Implement transfer pulse.
-- [ ] Implement Braille progress animation.
-- [ ] Implement peer heartbeat.
-- [ ] Implement focused-pane transition.
-- [ ] Implement modal reveal.
-- [ ] Implement success transition.
-- [ ] Implement failure transition.
-- [ ] Ensure animations never interfere with navigation.
-- [ ] Test CPU usage during idle periods.
+- [ ] Establish reusable OpenTUI animation/tick primitives.
+- [ ] Pause unnecessary animation while idle.
+- [ ] Transfer pulse.
+- [ ] Braille progress animation.
+- [ ] mDNS heartbeat.
+- [ ] Pane focus transition.
+- [ ] Modal reveal.
+- [ ] Success transition.
+- [ ] Failure transition.
+- [ ] Validate idle CPU behavior.
 
 ---
 
-## 16. Modal System
-
-Create reusable modal infrastructure.
+# 15. Modal System
 
 - [ ] Pairing modal.
 - [ ] Diff modal.
@@ -480,125 +365,29 @@ Create reusable modal infrastructure.
 - [ ] Transfer details modal.
 - [ ] Confirmation modal.
 - [ ] Error modal.
-- [ ] Peer-selection modal.
-- [ ] Establish consistent modal sizing.
-- [ ] Establish consistent modal borders.
-- [ ] Establish modal focus behavior.
-- [ ] Implement keyboard dismissal.
-- [ ] Implement mouse/touch dismissal where appropriate.
+- [ ] Peer selection modal.
+- [ ] Shared modal sizing/borders/focus behavior.
+- [ ] Keyboard dismissal.
+- [ ] Mouse/touch dismissal.
 
 ---
 
-## 17. Help & Discoverability
-
-The application should teach itself.
+# 16. Help & Discoverability
 
 - [ ] Implement `?` help screen.
-- [ ] Display context-sensitive shortcuts.
-- [ ] Explain file-state symbols.
-- [ ] Explain peer-state indicators.
-- [ ] Explain transfer states.
-- [ ] Explain selection behavior.
-- [ ] Explain mobile interactions.
-- [ ] Ensure first-time users can understand the workflow without documentation.
+- [x] Basic shortcut guidance exists in the footer.
+- [ ] Context-sensitive shortcuts.
+- [ ] File-state legend.
+- [ ] Peer-state legend.
+- [ ] Transfer-state legend.
+- [ ] Mobile interaction guidance.
+- [ ] First-launch guidance.
 
 ---
 
-## 18. Complete Mock User Journey
+# 17. Complete Mock User Journey
 
-Once the individual components exist, connect them into one coherent workflow.
-
-### First Launch
-
-- [ ] Launch SyncWeave.
-- [ ] Show application shell.
-- [ ] Simulate peer discovery.
-- [ ] Show available peer.
-- [ ] Allow peer selection.
-- [ ] Open workspace.
-
-### Pairing
-
-- [ ] Open QR pairing.
-- [ ] Show QR.
-- [ ] Show pairing code.
-- [ ] Simulate scanning.
-- [ ] Simulate authentication.
-- [ ] Transition into connected state.
-
-### Browse
-
-- [ ] Browse local files.
-- [ ] Browse remote files.
-- [ ] Switch panes.
-- [ ] Navigate directories.
-
-### Inspect
-
-- [ ] Select modified file.
-- [ ] Open diff.
-- [ ] Navigate changes.
-- [ ] Stage a hunk.
-- [ ] Return to workspace.
-
-### Stage
-
-- [ ] Select multiple files.
-- [ ] Show staged count.
-- [ ] Show total size.
-- [ ] Review staged changes.
-
-### Sync
-
-- [ ] Press `s`.
-- [ ] Show transfer confirmation if appropriate.
-- [ ] Begin simulated transfer.
-- [ ] Show transfer animation.
-- [ ] Show progress.
-- [ ] Show speed.
-- [ ] Show ETA.
-- [ ] Complete transfer.
-
-### Finish
-
-- [ ] Update mock filesystem state.
-- [ ] Mark transferred files as synchronized.
-- [ ] Show success state.
-- [ ] Return to normal workspace.
-- [ ] Ensure the user understands what changed.
-
----
-
-## 19. UX Polish Pass
-
-After the complete workflow works:
-
-- [ ] Remove visual inconsistencies.
-- [ ] Normalize spacing.
-- [ ] Normalize borders.
-- [ ] Normalize icons.
-- [ ] Normalize state colors.
-- [ ] Review keyboard navigation.
-- [ ] Review touch interaction.
-- [ ] Review responsive layouts.
-- [ ] Review empty states.
-- [ ] Review loading states.
-- [ ] Review errors.
-- [ ] Review transitions.
-- [ ] Review animation timing.
-- [ ] Reduce unnecessary visual noise.
-- [ ] Ensure important information has visual priority.
-- [ ] Test the interface without reading documentation.
-- [ ] Test the interface on a desktop terminal.
-- [ ] Test the interface in Termux.
-- [ ] Test narrow portrait layouts.
-- [ ] Test light and dark terminal backgrounds where possible.
-
----
-
-## 20. Phase 1 Definition of Done
-
-Phase 1 is complete when a user can experience the entire SyncWeave workflow without any real networking implementation:
+The final Phase 1 workflow is:
 
 ```text
 Launch
@@ -630,15 +419,66 @@ Workspace Updates
 Files Become "Synced"
 ```
 
-The application should feel like a real, polished synchronization tool despite the networking and filesystem layers being entirely simulated.
+### Current progress
 
-Only after this workflow and visual system are satisfactory should we begin replacing the mock implementations with:
+- [x] Launch application shell.
+- [x] Show mock peer/discovery status.
+- [x] Show local and remote workspaces.
+- [x] Navigate both panes.
+- [x] Switch panes with `Tab`.
+- [x] Select files with `Space`.
+- [x] Show synchronization states.
+- [x] Trigger mock sync action.
+- [x] Trigger mock diff workflow status.
+- [x] Trigger mock pairing workflow status.
+- [ ] Complete actual mock pairing UI.
+- [ ] Complete actual mock diff UI.
+- [ ] Complete actual mock transfer simulation.
+- [ ] Complete responsive mobile layout.
+- [ ] Complete mouse/touch workflow.
+- [ ] Complete animation system.
 
-1. Real filesystem access
-2. Real file comparison
-3. Real mDNS discovery
-4. Real peer identity/authentication
-5. Real QUIC transport
-6. Real chunked transfers
-7. Real synchronization semantics
-8. Real persistence/recovery
+---
+
+# 18. UX Polish Pass
+
+After the complete mock workflow exists:
+
+- [ ] Normalize spacing.
+- [ ] Normalize borders.
+- [ ] Normalize icons.
+- [ ] Normalize state colors.
+- [ ] Review keyboard navigation.
+- [ ] Review touch interaction.
+- [ ] Review responsive layouts.
+- [ ] Review empty states.
+- [ ] Review loading states.
+- [ ] Review errors.
+- [ ] Review transitions.
+- [ ] Review animation timing.
+- [ ] Reduce visual noise.
+- [ ] Ensure important information has visual priority.
+- [ ] Test without documentation.
+- [ ] Test desktop terminal.
+- [ ] Test Termux.
+- [ ] Test narrow portrait layouts.
+- [ ] Test light/dark terminal backgrounds where practical.
+
+---
+
+# 19. Phase 1 Definition of Done
+
+Phase 1 is complete when a user can experience the entire SyncWeave workflow with **zero real networking or synchronization** and the UI is considered polished enough to serve as the product's visual contract.
+
+Only after Phase 1 is approved should we begin replacing mocks with:
+
+1. Real filesystem access.
+2. Real file comparison.
+3. Real mDNS discovery.
+4. Real peer identity/authentication.
+5. Real QUIC transport.
+6. Real chunked transfers.
+7. Real synchronization semantics.
+8. Real persistence/recovery.
+
+**Principle:** build the experience first; connect the machinery second.
