@@ -4,7 +4,7 @@
 
 ## Locked architecture
 
-**OpenTUI + TypeScript is the sole UI stack.** Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework. OpenTUI is the native Zig terminal UI core with TypeScript bindings and component/layout primitives. The upstream project also provides its own documentation/agent skill and should be consulted when an unfamiliar API is needed. urlOpenTUI repositoryhttps://github.com/anomalyco/opentui
+**OpenTUI + TypeScript is the sole UI stack.** Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework. OpenTUI is the native Zig terminal UI core with TypeScript bindings and component/layout primitives. The upstream project also provides its own documentation/agent skill and should be consulted when an unfamiliar API is needed. https://github.com/anomalyco/opentui
 
 ### Phase 1 stack
 
@@ -47,9 +47,9 @@
 - [x] Add Bun development/start scripts.
 - [x] Establish `src/main.ts` OpenTUI entry point.
 - [ ] Extract dedicated UI component modules.
-- [ ] Extract dedicated application-state module.
-- [ ] Extract dedicated mock-service modules.
-- [ ] Define interfaces separating UI/domain state from future real services.
+- [x] Extract dedicated application-state module.
+- [x] Extract dedicated mock-service modules.
+- [x] Define interfaces separating UI/domain state from future real services.
 - [ ] Add automated typecheck/CI validation.
 - [ ] Add automated startup/smoke test.
 
@@ -199,7 +199,7 @@ Current scenario:
 - [x] Completion state.
 - [x] Workspace state updated after completion.
 - [x] Animated/progressive transfer gauge.
-- [ ] Dedicated mock transfer service module.
+- [x] Dedicated mock transfer service module.
 - [ ] Failure simulation.
 - [ ] Cancellation simulation.
 - [ ] Retry simulation.
@@ -211,7 +211,7 @@ Current scenario:
 
 - [x] Mock online peer state displayed.
 - [x] Mock peer count displayed.
-- [ ] Dedicated peer model/service.
+- [x] Dedicated peer model/service.
 - [ ] Simulated peer appearance/disappearance.
 - [ ] Simulated connection establishment/failure.
 - [ ] Multiple-peer selection.
@@ -321,38 +321,6 @@ Pairing is still entirely mocked; the current QR is a visual terminal mock rathe
 - [ ] First-launch onboarding.
 
 ## 17. Complete Mock User Journey
-
-```text
-Launch
-  ↓
-Discover Mock Peer
-  ↓
-Pair via Mock QR Flow
-  ↓
-Connected Workspace
-  ↓
-Browse Local / Remote Files
-  ↓
-Inspect Differences
-  ↓
-Select Files / Hunks
-  ↓
-Stage Changes
-  ↓
-Review Transfer
-  ↓
-Start Mock Sync
-  ↓
-Watch Animated Transfer
-  ↓
-Transfer Completes
-  ↓
-Workspace Updates
-  ↓
-Files Become "Synced"
-```
-
-### Progress
 
 - [x] Launch application shell.
 - [x] Show mock peer/discovery status.
