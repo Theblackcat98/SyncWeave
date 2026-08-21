@@ -1,68 +1,21 @@
-import {
-  BoxRenderable,
-  RGBA,
-  TextRenderable,
-  createCliRenderer,
-  type CliRenderer,
-  type KeyEvent,
-} from "@opentui/core"
+import { BoxRenderable, RGBA, createCliRenderer, type CliRenderer, type KeyEvent } from "@opentui/core"
 import { createInitialState, MOCK_DIFF } from "./domain/mock-data"
-import type { AppState, MockFile, Pane, SyncState } from "./domain/types"
+import type { AppState, MockFile, Pane } from "./domain/types"
 import { SyncWeaveStore } from "./domain/store"
 import { MockPeerService } from "./mocks/services"
-
-const COLORS = {
-  background: "#12131C",
-  surface: "#1E1E2E",
-  selected: "#263244",
-  border: "#64748B",
-  focus: "#38BDF8",
-  remote: "#A855F7",
-  success: "#4ADE80",
-  warning: "#FBBF24",
-  danger: "#F87171",
-  muted: "#94A3B8",
-  text: "#E2E8F0",
-}
+import { createActionRail, createModal, createPanel, createText } from "./ui/primitives"
+import { COLORS, DIMENSIONS, stateColor, stateGlyph } from "./ui/theme"
 
 const store = new SyncWeaveStore()
 let renderer: CliRenderer
 let transferTimer: ReturnType<typeof setInterval> | undefined
 let pairingTimer: ReturnType<typeof setInterval> | undefined
+const peerService = new MockPeerService(createInitialState().peers)
 
-// Services are deliberately constructed outside the UI. Real implementations can replace
-// these later without changing the OpenTUI component layer.
-const initialState = createInitialState()
-const peerService = new MockPeerService(initialState.peers)
-
-function stateGlyph(state: SyncState): string {
-  return { synced: "•", added: "+", modified: "~", deleted: "-", conflict: "!" }[state]
-}
-
-function stateColor(state: SyncState): string {
-  return { synced: COLORS.muted, added: COLORS.success, modified: COLORS.warning, deleted: COLORS.danger, conflict: COLORS.danger }[state]
-}
-
-function text(content: string, fg: string, id: string): TextRenderable {
-  return new TextRenderable(renderer, { id, content, fg })
-}
-
-function filesFor(state: AppState, pane: Pane): MockFile[] {
-  return pane === "local" ? state.localFiles : state.remoteFiles
-}
-
-function cursorFor(state: AppState, pane: Pane): number {
-  return pane === "local" ? state.localCursor : state.remoteCursor
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`
-}
-
-function selectedFiles(state: AppState): MockFile[] {
-  return [...state.localFiles, ...state.remoteFiles].filter((file) => file.selected && file.kind === "file")
-}
+function filesFor(state: AppState, pane: Pane): MockFile[] { return pane === "local" ? state.localFiles : state.remoteFiles }
+function cursorFor(state: AppState, pane: Pane): number { return pane === "local" ? state.localCursor : state.remoteCursor }
+function formatBytes(bytes: number): string { return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB` }
+function selectedFiles(state: AppState): MockFile[] { return [...state.localFiles, ...state.remoteFiles].filter((file) => file.selected && file.kind === "file") }
 
 function qrBlock(seed: number): string[] {
   const size = 13
@@ -83,29 +36,12 @@ function buildPane(state: AppState, pane: Pane, title: string, path: string): Bo
   const files = filesFor(state, pane)
   const cursor = cursorFor(state, pane)
   const focused = state.activePane === pane
-  const panel = new BoxRenderable(renderer, {
-    id: `${pane}-pane`,
-    flexGrow: 1,
-    flexDirection: "column",
-    border: true,
-    borderColor: focused ? COLORS.focus : COLORS.border,
-    title: `${title}  ${path}`,
-    titleAlignment: "left",
-    paddingLeft: 1,
-    paddingRight: 1,
-    paddingTop: 1,
-  })
-
+  const panel = createPanel(renderer, `${pane}-pane`, { flexGrow: 1, flexDirection: "column", borderColor: focused ? COLORS.focus : COLORS.border, title: `${title}  ${path}`, titleAlignment: "left", paddingTop: 1 })
   files.forEach((file, index) => {
-    const row = new BoxRenderable(renderer, {
-      id: `${pane}-row-${index}`,
-      height: 1,
-      flexDirection: "row",
-      backgroundColor: index === cursor && focused ? COLORS.selected : COLORS.surface,
-    })
+    const row = new BoxRenderable(renderer, { id: `${pane}-row-${index}`, height: 1, flexDirection: "row", backgroundColor: index === cursor && focused ? COLORS.selected : COLORS.surface })
     const marker = file.selected ? "✓" : " "
     const content = `${marker} ${stateGlyph(file.state)} ${file.icon} ${file.name.padEnd(28)} ${file.size.padStart(7)}  ${file.state}`
-    row.add(text(content, index === cursor && focused ? COLORS.text : stateColor(file.state), `${pane}-text-${index}`))
+    row.add(createText(renderer, `${pane}-text-${index}`, content, index === cursor && focused ? COLORS.text : stateColor(file.state)))
     panel.add(row)
   })
   return panel
@@ -113,31 +49,16 @@ function buildPane(state: AppState, pane: Pane, title: string, path: string): Bo
 
 function addHeader(root: BoxRenderable, state: AppState): void {
   const onlinePeers = peerService.listPeers().filter((peer) => peer.status === "online").length
-  const header = new BoxRenderable(renderer, {
-    id: "header",
-    height: 3,
-    flexDirection: "row",
-    border: true,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.surface,
-    paddingLeft: 1,
-    paddingRight: 1,
-  })
-  header.add(text("SyncWeave", COLORS.focus, "brand"))
-  header.add(text("  v0.1.0", COLORS.muted, "version"))
-  header.add(text("                         ", COLORS.text, "header-space"))
-  header.add(text("● mDNS: Active", COLORS.success, "mdns"))
-  header.add(text(`  • Peers: ${onlinePeers} Online`, COLORS.remote, "peers"))
-  header.add(text(`  • ${state.connectedPeerId ? "Connected" : "Disconnected"}`, state.connectedPeerId ? COLORS.success : COLORS.muted, "connection"))
+  const header = createPanel(renderer, "header", { height: DIMENSIONS.headerHeight, flexDirection: "row", paddingLeft: 1, paddingRight: 1 })
+  header.add(createText(renderer, "brand", "SyncWeave", COLORS.focus))
+  header.add(createText(renderer, "version", "  v0.1.0", COLORS.muted))
+  header.add(createText(renderer, "header-space", "                         "))
+  header.add(createText(renderer, "mdns", "● mDNS: Active", COLORS.success))
+  header.add(createText(renderer, "peers", `  • Peers: ${onlinePeers} Online`, COLORS.remote))
+  header.add(createText(renderer, "connection", `  • ${state.connectedPeerId ? "Connected" : "Disconnected"}`, state.connectedPeerId ? COLORS.success : COLORS.muted))
   root.add(header)
 }
-
-function addFooter(root: BoxRenderable, content: string): void {
-  const footer = new BoxRenderable(renderer, { id: "footer", height: 2, flexDirection: "row", marginTop: 1 })
-  footer.add(text(content, COLORS.text, "footer-actions"))
-  root.add(footer)
-}
-
+function addFooter(root: BoxRenderable, content: string): void { root.add(createActionRail(renderer, content)) }
 function addActivity(root: BoxRenderable, state: AppState): void {
   const selected = selectedFiles(state)
   const progress = state.transfer?.progress ?? 0
@@ -146,69 +67,44 @@ function addActivity(root: BoxRenderable, state: AppState): void {
   const gauge = "█".repeat(filled) + "░".repeat(gaugeSize - filled)
   const selectedLabel = selected.length === 0 ? "No staged files" : `${selected.length} staged • ${formatBytes(selected.reduce((sum, file) => sum + file.bytes, 0))}`
   const stream = state.transfer?.state === "transferring" ? `architecture-diagram.md  [chunk ${Math.max(1, Math.ceil(progress / 8))}/13]` : state.status
-  const activity = new BoxRenderable(renderer, {
-    id: "activity-panel",
-    height: 3,
-    border: true,
-    borderColor: state.transfer?.state === "transferring" ? COLORS.focus : COLORS.border,
-    flexDirection: "column",
-    paddingLeft: 1,
-  })
-  activity.add(text(`Active Stream: ${stream}`, COLORS.text, "activity-status"))
-  activity.add(text(`Progress: ⣾⣷⣯⣟⡿⢿  [${gauge}] ${progress}%  •  ${selectedLabel}`, state.transfer?.state === "transferring" ? COLORS.focus : COLORS.muted, "activity-progress"))
+  const activity = createPanel(renderer, "activity-panel", { height: DIMENSIONS.activityHeight, borderColor: state.transfer?.state === "transferring" ? COLORS.focus : COLORS.border, flexDirection: "column" })
+  activity.add(createText(renderer, "activity-status", `Active Stream: ${stream}`))
+  activity.add(createText(renderer, "activity-progress", `Progress: ⣾⣷⣯⣟⡿⢿  [${gauge}] ${progress}%  •  ${selectedLabel}`, state.transfer?.state === "transferring" ? COLORS.focus : COLORS.muted))
   root.add(activity)
 }
-
 function addModal(root: BoxRenderable, title: string, lines: string[], accent = COLORS.focus): void {
-  const modal = new BoxRenderable(renderer, {
-    id: "modal",
-    flexGrow: 1,
-    flexDirection: "column",
-    border: true,
-    borderColor: accent,
-    backgroundColor: COLORS.surface,
-    padding: 2,
-    marginTop: 1,
-    marginBottom: 1,
-  })
-  modal.add(text(`╭─ ${title} ─╮`, accent, "modal-title"))
-  for (const [index, line] of lines.entries()) modal.add(text(line, COLORS.text, `modal-line-${index}`))
+  const modal = createModal(renderer, "modal", accent)
+  modal.add(createText(renderer, "modal-title", `╭─ ${title} ─╮`, accent))
+  lines.forEach((line, index) => modal.add(createText(renderer, `modal-line-${index}`, line)))
   root.add(modal)
 }
-
 function renderPairing(root: BoxRenderable, state: AppState): void {
   const qr = qrBlock(42).map((line) => `    ${line}`)
-  const status = ["Waiting for peer…", "Peer discovered — authenticating…", "Connected — pairing complete!"][state.pairingStep]
-  addModal(root, "Peer Pairing · Scan with Camera or Termux", ["", ...qr, "", "    Code: 8492-AXQ1     Relay: Direct P2P", "    Auth: Ed25519 Ephemeral", `    ${status}`, "", "    [Esc] Cancel"], state.pairingStep === 2 ? COLORS.success : COLORS.remote)
+  const pairingStatus = ["Waiting for peer…", "Peer discovered — authenticating…", "Connected — pairing complete!"][state.pairingStep]
+  addModal(root, "Peer Pairing · Scan with Camera or Termux", ["", ...qr, "", "    Code: 8492-AXQ1     Relay: Direct P2P", "    Auth: Ed25519 Ephemeral", `    ${pairingStatus}`, "", "    [Esc] Cancel"], state.pairingStep === 2 ? COLORS.success : COLORS.remote)
   addFooter(root, "[Enter] Simulate Scan  [Esc] Cancel  [Ctrl+C] Exit")
 }
-
 function renderDiff(root: BoxRenderable, state: AppState): void {
-  const lines = MOCK_DIFF.map((line) => {
-    const marker = line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "
-    return `${marker} ${String(line.line).padStart(2, "0")}  ${line.local.padEnd(38)} │ ${line.remote}`
-  })
+  const lines = MOCK_DIFF.map((line) => `${line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "} ${String(line.line).padStart(2, "0")}  ${line.local.padEnd(38)} │ ${line.remote}`)
   addModal(root, "Diff Inspector · architecture-diagram.md", ["", " LOCAL                                      REMOTE", "────────────────────────────────────────────────────────────────", ...lines, "", `  ~ 2 changed hunks   Hunk ${state.selectedHunk + 1}/2`, "", "  [Tab] Next Hunk   [Enter] Stage Hunk   [Esc] Close"], COLORS.warning)
   addFooter(root, "[Tab] Next Hunk  [Enter] Stage Hunk  [Esc] Close  [Ctrl+C] Exit")
 }
-
 function renderTransfer(root: BoxRenderable, state: AppState): void {
   const transfer = state.transfer
   const progress = transfer?.progress ?? 0
   const complete = transfer?.state === "complete"
   const selected = selectedFiles(state)
-  const gauge = "█".repeat(Math.floor((progress / 100) * 34)) + "░".repeat(34 - Math.floor((progress / 100) * 34))
+  const filled = Math.floor((progress / 100) * 34)
+  const gauge = "█".repeat(filled) + "░".repeat(34 - filled)
   addModal(root, "Sync Staged Changes", ["", complete ? "✓ Transfer complete — workspace synchronized" : "⠋ Transferring staged files…", "", `  ${gauge}  ${progress}%`, `  Speed: ${complete ? "—" : `${transfer?.speedMbps.toFixed(1) ?? "14.2"} MB/s`}    ETA: ${complete ? "done" : `${transfer?.etaSeconds ?? 1}s`}`, "", `  Files: ${selected.length || transfer?.fileIds.length || 0}    Size: ${formatBytes(transfer?.bytesTotal ?? selected.reduce((sum, file) => sum + file.bytes, 0))}`, "", complete ? "  [Enter] Return to Workspace" : "  [Esc] Cancel"], complete ? COLORS.success : COLORS.focus)
   addFooter(root, complete ? "[Enter] Return  [Ctrl+C] Exit" : "[Esc] Cancel  [Ctrl+C] Exit")
 }
-
 function buildUI(): void {
   const state = store.getState()
   renderer.root.removeAll()
   const root = new BoxRenderable(renderer, { id: "root", flexGrow: 1, flexDirection: "column", backgroundColor: COLORS.background, padding: 1 })
   renderer.root.add(root)
   addHeader(root, state)
-
   if (state.screen === "workspace") {
     const workspace = new BoxRenderable(renderer, { id: "workspace", flexGrow: 1, flexDirection: "row", gap: 1, marginTop: 1, marginBottom: 1 })
     workspace.add(buildPane(state, "local", "LOCAL WORKSPACE", state.localPath))
@@ -216,19 +112,11 @@ function buildUI(): void {
     root.add(workspace)
     addActivity(root, state)
     addFooter(root, "[↑↓] Navigate  [Tab] Pane  [Space] Stage  [s] Sync  [d] Diff  [q] Pair  [?] Help  [Ctrl+C] Exit")
-  } else if (state.screen === "pairing") {
-    renderPairing(root, state)
-  } else if (state.screen === "diff") {
-    renderDiff(root, state)
-  } else {
-    renderTransfer(root, state)
-  }
+  } else if (state.screen === "pairing") renderPairing(root, state)
+  else if (state.screen === "diff") renderDiff(root, state)
+  else renderTransfer(root, state)
 }
-
-function stopTimer(timer: ReturnType<typeof setInterval> | undefined): void {
-  if (timer) clearInterval(timer)
-}
-
+function stopTimer(timer: ReturnType<typeof setInterval> | undefined): void { if (timer) clearInterval(timer) }
 function startPairing(): void {
   stopTimer(pairingTimer)
   peerService.cancelPairing()
@@ -241,13 +129,9 @@ function startPairing(): void {
     if (store.getState().pairingStep >= 2) stopTimer(pairingTimer)
   }, 900)
 }
-
 function startTransfer(): void {
   store.dispatch({ type: "start-transfer" })
-  if (!store.getState().transfer) {
-    buildUI()
-    return
-  }
+  if (!store.getState().transfer) return void buildUI()
   stopTimer(transferTimer)
   buildUI()
   transferTimer = setInterval(() => {
@@ -259,7 +143,6 @@ function startTransfer(): void {
     buildUI()
   }, 180)
 }
-
 function handleKey(key: KeyEvent): void {
   if (key.ctrl && key.name === "c") {
     stopTimer(transferTimer)
@@ -267,9 +150,7 @@ function handleKey(key: KeyEvent): void {
     renderer.stop()
     return
   }
-
   const state = store.getState()
-
   if (state.screen === "pairing") {
     if (key.name === "escape") {
       stopTimer(pairingTimer)
@@ -279,7 +160,6 @@ function handleKey(key: KeyEvent): void {
     }
     return
   }
-
   if (state.screen === "diff") {
     if (key.name === "escape") store.dispatch({ type: "close-overlay" })
     else if (key.name === "tab") store.dispatch({ type: "next-hunk" })
@@ -287,7 +167,6 @@ function handleKey(key: KeyEvent): void {
     buildUI()
     return
   }
-
   if (state.screen === "transfer") {
     if (key.name === "escape" && state.transfer?.state === "transferring") {
       stopTimer(transferTimer)
@@ -300,23 +179,12 @@ function handleKey(key: KeyEvent): void {
     }
     return
   }
-
   switch (key.name) {
-    case "tab":
-      store.dispatch({ type: "focus-pane", pane: state.activePane === "local" ? "remote" : "local" })
-      break
-    case "up":
-      store.dispatch({ type: "move-cursor", delta: -1 })
-      break
-    case "down":
-      store.dispatch({ type: "move-cursor", delta: 1 })
-      break
-    case "space":
-      store.dispatch({ type: "toggle-selection" })
-      break
-    case "s":
-      startTransfer()
-      return
+    case "tab": store.dispatch({ type: "focus-pane", pane: state.activePane === "local" ? "remote" : "local" }); break
+    case "up": store.dispatch({ type: "move-cursor", delta: -1 }); break
+    case "down": store.dispatch({ type: "move-cursor", delta: 1 }); break
+    case "space": store.dispatch({ type: "toggle-selection" }); break
+    case "s": startTransfer(); return
     case "d": {
       const files = filesFor(state, state.activePane)
       const cursor = cursorFor(state, state.activePane)
@@ -324,18 +192,12 @@ function handleKey(key: KeyEvent): void {
       else store.dispatch({ type: "set-status", status: `No divergence to inspect: ${files[cursor]?.name ?? "selection"}` })
       break
     }
-    case "q":
-      startPairing()
-      return
-    case "?":
-      store.dispatch({ type: "set-status", status: "Help: Tab panes • Space stage • s sync • d diff • q pair" })
-      break
-    default:
-      return
+    case "q": startPairing(); return
+    case "?": store.dispatch({ type: "set-status", status: "Help: Tab panes • Space stage • s sync • d diff • q pair" }); break
+    default: return
   }
   buildUI()
 }
-
 async function main(): Promise<void> {
   renderer = await createCliRenderer({ exitOnCtrlC: false })
   renderer.setBackgroundColor(RGBA.fromHex(COLORS.background))
@@ -343,5 +205,4 @@ async function main(): Promise<void> {
   buildUI()
   renderer.start()
 }
-
 await main()
