@@ -49,11 +49,17 @@ export interface AppState {
   activePane: Pane
   localCursor: number
   remoteCursor: number
+  localScroll: number
+  remoteScroll: number
   status: string
   localPath: string
   remotePath: string
   localFiles: MockFile[]
   remoteFiles: MockFile[]
+  localDirectoryStack: string[]
+  remoteDirectoryStack: string[]
+  localDirectoryMap: Record<string, MockFile[]>
+  remoteDirectoryMap: Record<string, MockFile[]>
   peers: MockPeer[]
   connectedPeerId: string | null
   transfer: TransferJob | null
