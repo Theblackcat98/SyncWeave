@@ -27,6 +27,10 @@ export type AppAction =
   | { type: "focus-pane"; pane: AppState["activePane"] }
   | { type: "move-cursor"; delta: -1 | 1 }
   | { type: "toggle-selection" }
+  | { type: "select-all" }
+  | { type: "deselect-all" }
+  | { type: "open-directory" }
+  | { type: "navigate-up" }
   | { type: "open-pairing" }
   | { type: "pairing-step" }
   | { type: "cancel-pairing" }

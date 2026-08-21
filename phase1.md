@@ -4,7 +4,7 @@
 
 ## Locked architecture
 
-**OpenTUI + TypeScript is the sole UI stack.** Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework. OpenTUI is the native Zig terminal UI core with TypeScript bindings and component/layout primitives. The upstream project also provides its own documentation/agent skill and should be consulted when an unfamiliar API is needed. https://github.com/anomalyco/opentui
+**OpenTUI + TypeScript is the sole UI stack.** Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework.
 
 ### Phase 1 stack
 
@@ -53,13 +53,7 @@
 - [ ] Add automated typecheck/CI validation.
 - [ ] Add automated startup/smoke test.
 
-Explicitly excluded:
-
-- [x] Bubble Tea — not used.
-- [x] Lip Gloss — not used.
-- [x] Ratatui — not used.
-- [x] Real networking — deferred.
-- [x] Real synchronization — deferred.
+Explicitly excluded: Bubble Tea, Lip Gloss, Ratatui, real networking, and real synchronization.
 
 ## 2. Visual Design System
 
@@ -74,16 +68,17 @@ Explicitly excluded:
 - [x] Coral deleted/error `#F87171`.
 - [x] Muted synchronized state `#64748B` / `#94A3B8`.
 - [x] Focused-row treatment.
-- [ ] Extract design tokens into a dedicated theme module.
-- [ ] Define typography hierarchy and spacing tokens.
-- [ ] Define reusable border/component styles.
+- [x] Extract design tokens into a dedicated theme module.
+- [x] Define reusable border/component styles.
+- [x] Define spacing/dimension tokens.
 - [ ] Define disabled/loading/inactive states.
 
 ### Terminal rendering
 
 - [x] Unicode synchronization-state glyphs.
 - [x] Nerd Font file icons.
-- [ ] ASCII icon fallback.
+- [x] Define ASCII fallback icon vocabulary.
+- [ ] Automatically select fallback icons when Nerd Fonts are unavailable.
 - [ ] Verify desktop terminal rendering.
 - [ ] Verify Termux rendering.
 - [ ] Audit Android glyph compatibility.
@@ -99,7 +94,7 @@ Explicitly excluded:
 - [x] Mock mDNS status.
 - [x] Mock peer count.
 - [ ] Animated mDNS heartbeat.
-- [ ] Dynamic contextual footer actions.
+- [x] Dynamic contextual footer actions.
 - [ ] Responsive resizing.
 
 ## 4. Dual-Pane Workspace
@@ -113,8 +108,8 @@ Explicitly excluded:
 - [x] Synchronization state.
 - [x] Selection state.
 - [x] Keyboard navigation.
-- [ ] Directory navigation.
-- [ ] Scrolling for larger datasets.
+- [x] Directory navigation.
+- [x] Scrolling for larger datasets.
 - [ ] Mouse/touch selection.
 
 ### Remote
@@ -142,9 +137,11 @@ Explicitly excluded:
 - [x] Realistic filenames/paths.
 - [x] File sizes and byte counts.
 - [x] Synced/added/modified/deleted state model.
+- [x] Conflict state fixture.
 - [x] Multiple selectable files.
-- [ ] Explicit directory nodes.
-- [ ] Directory traversal.
+- [x] Explicit directory nodes.
+- [x] Directory traversal.
+- [x] Scrollable larger mock datasets.
 - [ ] Rich metadata.
 - [ ] Configurable mock scenarios.
 
@@ -155,7 +152,18 @@ Current scenario:
 ├── architecture-diagram.md
 ├── daily-todo.txt
 ├── configs/
-└── build-artifact.tar.gz
+│   ├── termux.properties
+│   ├── shell.conf
+│   └── gitconfig
+├── build-artifact.tar.gz
+├── README.md
+├── roadmap.md
+├── .env.example
+├── design-notes.md
+├── assets/
+├── bun.lock
+├── meeting-notes.md
+└── release-checklist.md
 ```
 
 ## 6. Synchronization State Visualization
@@ -164,10 +172,10 @@ Current scenario:
 - [x] Added state.
 - [x] Modified/diverged state.
 - [x] Deleted state type.
+- [x] Conflict state.
 - [x] State glyphs.
 - [x] Semantic state colors.
 - [x] State displayed directly in rows.
-- [ ] Conflict state.
 - [ ] State legend/help.
 - [ ] State transition animations.
 
@@ -180,8 +188,8 @@ Current scenario:
 - [x] Aggregate selected-file count.
 - [x] Prevent sync when nothing is staged.
 - [x] Show aggregate selected size in transfer UI.
-- [ ] Select all.
-- [ ] Deselect all.
+- [x] Select all.
+- [x] Deselect all.
 - [x] Staged-transfer workflow UI.
 - [ ] Explicit pre-transfer confirmation.
 
@@ -222,7 +230,7 @@ Current scenario:
 Pairing is still entirely mocked; the current QR is a visual terminal mock rather than a cryptographic QR payload.
 
 - [x] Pairing screen/modal.
-- [x] Terminal QR-like visual rendered directly in the TUI.
+- [x] Terminal QR-like visual.
 - [x] Pairing code display.
 - [x] Connection method display.
 - [x] Authentication-state display.
@@ -230,7 +238,7 @@ Pairing is still entirely mocked; the current QR is a visual terminal mock rathe
 - [x] Simulated peer discovery/authentication progression.
 - [x] Successful pairing state.
 - [x] `Esc` cancellation.
-- [ ] Integrate `@opentui/qrcode` for a real encoded QR.
+- [ ] Integrate `@opentui/qrcode`.
 - [ ] Simulate timeout/failure.
 - [ ] Simulate retry.
 - [ ] Persist paired-peer state.
@@ -305,7 +313,7 @@ Pairing is still entirely mocked; the current QR is a visual terminal mock rathe
 - [ ] Confirmation modal.
 - [ ] Error modal.
 - [ ] Peer selection modal.
-- [ ] Shared modal sizing/borders/focus behavior.
+- [x] Shared modal sizing/borders/focus primitive.
 - [x] Keyboard dismissal for implemented screens.
 - [ ] Mouse/touch dismissal.
 
@@ -327,8 +335,11 @@ Pairing is still entirely mocked; the current QR is a visual terminal mock rathe
 - [x] Show local and remote workspaces.
 - [x] Navigate both panes.
 - [x] Switch panes with `Tab`.
-- [x] Select files with `Space`.
-- [x] Show synchronization states.
+- [x] Scroll larger mock workspaces.
+- [x] Enter directories and navigate back.
+- [x] Select individual files with `Space`.
+- [x] Select/deselect all.
+- [x] Show synchronization states including conflict.
 - [x] Open mock pairing experience.
 - [x] Open mock diff experience.
 - [x] Stage a mock diff hunk.

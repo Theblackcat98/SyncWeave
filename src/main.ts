@@ -11,12 +11,13 @@ let renderer: CliRenderer
 let transferTimer: ReturnType<typeof setInterval> | undefined
 let pairingTimer: ReturnType<typeof setInterval> | undefined
 const peerService = new MockPeerService(createInitialState().peers)
+const VISIBLE_ROWS = 8
 
 function filesFor(state: AppState, pane: Pane): MockFile[] { return pane === "local" ? state.localFiles : state.remoteFiles }
 function cursorFor(state: AppState, pane: Pane): number { return pane === "local" ? state.localCursor : state.remoteCursor }
+function scrollFor(state: AppState, pane: Pane): number { return pane === "local" ? state.localScroll : state.remoteScroll }
 function formatBytes(bytes: number): string { return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB` }
 function selectedFiles(state: AppState): MockFile[] { return [...state.localFiles, ...state.remoteFiles].filter((file) => file.selected && file.kind === "file") }
-
 function qrBlock(seed: number): string[] {
   const size = 13
   return Array.from({ length: size }, (_, y) => {
@@ -35,15 +36,21 @@ function qrBlock(seed: number): string[] {
 function buildPane(state: AppState, pane: Pane, title: string, path: string): BoxRenderable {
   const files = filesFor(state, pane)
   const cursor = cursorFor(state, pane)
+  const scroll = scrollFor(state, pane)
   const focused = state.activePane === pane
+  const visible = files.slice(scroll, scroll + VISIBLE_ROWS)
   const panel = createPanel(renderer, `${pane}-pane`, { flexGrow: 1, flexDirection: "column", borderColor: focused ? COLORS.focus : COLORS.border, title: `${title}  ${path}`, titleAlignment: "left", paddingTop: 1 })
-  files.forEach((file, index) => {
+  visible.forEach((file, visibleIndex) => {
+    const index = visibleIndex + scroll
     const row = new BoxRenderable(renderer, { id: `${pane}-row-${index}`, height: 1, flexDirection: "row", backgroundColor: index === cursor && focused ? COLORS.selected : COLORS.surface })
     const marker = file.selected ? "✓" : " "
-    const content = `${marker} ${stateGlyph(file.state)} ${file.icon} ${file.name.padEnd(28)} ${file.size.padStart(7)}  ${file.state}`
+    const directoryMarker = file.kind === "directory" ? "›" : " "
+    const content = `${marker} ${stateGlyph(file.state)} ${directoryMarker}${file.icon} ${file.name.padEnd(27)} ${file.size.padStart(7)}  ${file.state}`
     row.add(createText(renderer, `${pane}-text-${index}`, content, index === cursor && focused ? COLORS.text : stateColor(file.state)))
     panel.add(row)
   })
+  const position = files.length > VISIBLE_ROWS ? `  ${scroll + 1}-${Math.min(scroll + VISIBLE_ROWS, files.length)}/${files.length}` : ""
+  panel.add(createText(renderer, `${pane}-scroll`, `${files.length > VISIBLE_ROWS ? "↕ Scroll" : ""}${position}`, COLORS.muted))
   return panel
 }
 
@@ -65,7 +72,9 @@ function addActivity(root: BoxRenderable, state: AppState): void {
   const gaugeSize = 28
   const filled = Math.floor((progress / 100) * gaugeSize)
   const gauge = "█".repeat(filled) + "░".repeat(gaugeSize - filled)
-  const selectedLabel = selected.length === 0 ? "No staged files" : `${selected.length} staged • ${formatBytes(selected.reduce((sum, file) => sum + file.bytes, 0))}`
+  const bytes = selected.reduce((sum, file) => sum + file.bytes, 0)
+  const names = selected.length <= 2 ? selected.map((file) => file.name).join(", ") : `${selected.length} files staged`
+  const selectedLabel = selected.length === 0 ? "No staged files" : `${names} • ${formatBytes(bytes)}`
   const stream = state.transfer?.state === "transferring" ? `architecture-diagram.md  [chunk ${Math.max(1, Math.ceil(progress / 8))}/13]` : state.status
   const activity = createPanel(renderer, "activity-panel", { height: DIMENSIONS.activityHeight, borderColor: state.transfer?.state === "transferring" ? COLORS.focus : COLORS.border, flexDirection: "column" })
   activity.add(createText(renderer, "activity-status", `Active Stream: ${stream}`))
@@ -99,6 +108,12 @@ function renderTransfer(root: BoxRenderable, state: AppState): void {
   addModal(root, "Sync Staged Changes", ["", complete ? "✓ Transfer complete — workspace synchronized" : "⠋ Transferring staged files…", "", `  ${gauge}  ${progress}%`, `  Speed: ${complete ? "—" : `${transfer?.speedMbps.toFixed(1) ?? "14.2"} MB/s`}    ETA: ${complete ? "done" : `${transfer?.etaSeconds ?? 1}s`}`, "", `  Files: ${selected.length || transfer?.fileIds.length || 0}    Size: ${formatBytes(transfer?.bytesTotal ?? selected.reduce((sum, file) => sum + file.bytes, 0))}`, "", complete ? "  [Enter] Return to Workspace" : "  [Esc] Cancel"], complete ? COLORS.success : COLORS.focus)
   addFooter(root, complete ? "[Enter] Return  [Ctrl+C] Exit" : "[Esc] Cancel  [Ctrl+C] Exit")
 }
+function workspaceFooter(state: AppState): string {
+  const files = filesFor(state, state.activePane)
+  const file = files[cursorFor(state, state.activePane)]
+  const directory = file?.kind === "directory"
+  return directory ? "[↑↓] Navigate  [Enter] Open  [Backspace] Up  [Tab] Pane  [Space] Stage  [a] All  [x] None  [q] Pair  [?] Help" : "[↑↓] Navigate  [Tab] Pane  [Space] Stage  [a] All  [x] None  [s] Sync  [d] Diff  [q] Pair  [?] Help"
+}
 function buildUI(): void {
   const state = store.getState()
   renderer.root.removeAll()
@@ -111,7 +126,7 @@ function buildUI(): void {
     workspace.add(buildPane(state, "remote", "REMOTE STAGING", `${state.connectedPeerId ? "MacBook-M3: " : "Remote: "}${state.remotePath}`))
     root.add(workspace)
     addActivity(root, state)
-    addFooter(root, "[↑↓] Navigate  [Tab] Pane  [Space] Stage  [s] Sync  [d] Diff  [q] Pair  [?] Help  [Ctrl+C] Exit")
+    addFooter(root, workspaceFooter(state))
   } else if (state.screen === "pairing") renderPairing(root, state)
   else if (state.screen === "diff") renderDiff(root, state)
   else renderTransfer(root, state)
@@ -179,21 +194,24 @@ function handleKey(key: KeyEvent): void {
     }
     return
   }
+  const files = filesFor(state, state.activePane)
+  const file = files[cursorFor(state, state.activePane)]
   switch (key.name) {
     case "tab": store.dispatch({ type: "focus-pane", pane: state.activePane === "local" ? "remote" : "local" }); break
     case "up": store.dispatch({ type: "move-cursor", delta: -1 }); break
     case "down": store.dispatch({ type: "move-cursor", delta: 1 }); break
     case "space": store.dispatch({ type: "toggle-selection" }); break
+    case "a": store.dispatch({ type: "select-all" }); break
+    case "x": store.dispatch({ type: "deselect-all" }); break
+    case "return": if (file?.kind === "directory") store.dispatch({ type: "open-directory" }); break
+    case "backspace": store.dispatch({ type: "navigate-up" }); break
     case "s": startTransfer(); return
-    case "d": {
-      const files = filesFor(state, state.activePane)
-      const cursor = cursorFor(state, state.activePane)
-      if (files[cursor]?.state === "modified") store.dispatch({ type: "open-diff" })
-      else store.dispatch({ type: "set-status", status: `No divergence to inspect: ${files[cursor]?.name ?? "selection"}` })
+    case "d":
+      if (file?.state === "modified") store.dispatch({ type: "open-diff" })
+      else store.dispatch({ type: "set-status", status: `No divergence to inspect: ${file?.name ?? "selection"}` })
       break
-    }
     case "q": startPairing(); return
-    case "?": store.dispatch({ type: "set-status", status: "Help: Tab panes • Space stage • s sync • d diff • q pair" }); break
+    case "?": store.dispatch({ type: "set-status", status: "Help: Enter opens directories • Backspace goes up • Space stages • a selects all • x clears" }); break
     default: return
   }
   buildUI()
