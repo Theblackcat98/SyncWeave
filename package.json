@@ -6,13 +6,14 @@
   "scripts": {
     "dev": "bun run src/main.ts",
     "start": "bun run src/main.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@opentui/core": "latest"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "typescript": "latest"
+    "typescript": "5.8.3"
   }
 }
