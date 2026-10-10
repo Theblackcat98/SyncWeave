@@ -23,7 +23,7 @@ export const SPACING = {
 export const SIZING = {
   headerHeight: 3,
   footerHeight: 2,
-  activityHeight: 3,
+  activityHeight: 4,
   activityGaugeWidth: 28,
   transferGaugeWidth: 34,
   fileNameColumnWidth: 28,

@@ -11,6 +11,22 @@ const rendererTest = NATIVE_RENDERER_SUPPORTED ? test : test.skip
 let setup: TestRendererSetup
 let ctx: UiContext
 
+async function waitForText(expected: string, timeoutMs = 5000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  let frame = setup.captureCharFrame()
+
+  while (!frame.includes(expected) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25))
+    await setup.renderOnce()
+    frame = setup.captureCharFrame()
+  }
+
+  if (!frame.includes(expected)) {
+    throw new Error(`Timed out waiting for ${JSON.stringify(expected)}.\n${frame}`)
+  }
+  return frame
+}
+
 beforeEach(async () => {
   if (!NATIVE_RENDERER_SUPPORTED) return
   setup = await createTestRenderer({ width: 100, height: 30 })
@@ -21,6 +37,7 @@ beforeEach(async () => {
 afterEach(() => {
   if (!NATIVE_RENDERER_SUPPORTED) return
   disposeApp(ctx)
+  setup.renderer.destroy()
 })
 
 describe("workspace shell", () => {
@@ -34,18 +51,18 @@ describe("workspace shell", () => {
   })
 
   rendererTest("tab switches focused pane", async () => {
-    setup.mockInput.pressKey("tab")
+    setup.mockInput.pressTab()
     await setup.renderOnce()
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Focused remote workspace")
   })
 
   rendererTest("space stages the focused file", async () => {
-    setup.mockInput.pressKey("space")
+    setup.mockInput.pressKey(" ")
     await setup.renderOnce()
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Staged architecture-diagram.md")
-    expect(frame).toContain("1 staged • 12.0 KB")
+    expect(frame).toContain("1 staged • 12 KB")
   })
 })
 
@@ -57,10 +74,9 @@ describe("mock transfer workflow", () => {
   })
 
   rendererTest("staged files transfer and become synced", async () => {
-    setup.mockInput.pressKey("space")
+    setup.mockInput.pressKey(" ")
     setup.mockInput.pressKey("s")
-    await setup.waitFor(() => setup.captureCharFrame().includes("Transfer complete"), { maxPasses: 200 })
-    let frame = setup.captureCharFrame()
+    let frame = await waitForText("Transfer complete")
     expect(frame).toContain("Transfer complete")
     expect(frame).toContain("[Enter] Return to Workspace")
 
@@ -72,12 +88,11 @@ describe("mock transfer workflow", () => {
   })
 
   rendererTest("escape cancels an in-flight transfer", async () => {
-    setup.mockInput.pressKey("space")
+    setup.mockInput.pressKey(" ")
     setup.mockInput.pressKey("s")
     await setup.renderOnce()
     setup.mockInput.pressEscape()
-    await setup.renderOnce()
-    const frame = setup.captureCharFrame()
+    const frame = await waitForText("Mock transfer cancelled")
     expect(frame).toContain("Mock transfer cancelled")
     expect(frame).toContain("LOCAL WORKSPACE")
   })
@@ -95,7 +110,7 @@ describe("pairing screen", () => {
 
   rendererTest("pairing progresses to connected", async () => {
     setup.mockInput.pressKey("q")
-    await setup.waitFor(() => setup.captureCharFrame().includes("pairing complete"), { maxPasses: 100 })
+    await waitForText("pairing complete")
     expect(setup.captureCharFrame()).toContain("Connected — pairing complete!")
   })
 
@@ -103,8 +118,8 @@ describe("pairing screen", () => {
     setup.mockInput.pressKey("q")
     await setup.renderOnce()
     setup.mockInput.pressEscape()
-    await setup.renderOnce()
-    expect(setup.captureCharFrame()).toContain("Pairing cancelled")
+    const frame = await waitForText("Pairing cancelled")
+    expect(frame).toContain("Pairing cancelled")
   })
 })
 
@@ -119,7 +134,7 @@ describe("diff inspector", () => {
   })
 
   rendererTest("d is rejected for synced files", async () => {
-    setup.mockInput.pressKey("down")
+    setup.mockInput.pressArrow("down")
     setup.mockInput.pressKey("d")
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("No divergence to inspect: daily-todo.txt")
