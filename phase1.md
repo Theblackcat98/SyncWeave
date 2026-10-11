@@ -11,8 +11,8 @@
 - **OpenTUI** — rendering, layout, components, keyboard/mouse input, and animation.
 - **TypeScript** — application and UI implementation.
 - **Bun** — runtime/package management.
-- **Mock services** — fake filesystem, peers, pairing, diffs, and transfers.
-- **Real networking/filesystem** — deferred until the UX is approved.
+- **Mock services** — fake filesystem, peer discovery, identity/verification, remembered destinations, transfer requests/consent, diffs, and transfers.
+- **Real networking/filesystem and any real pairing protocol** — deferred until the Phase 1 UX is approved and the security model is specified.
 
 ```text
                     SyncWeave
@@ -36,6 +36,21 @@
                  │ Animation │
                  └───────────┘
 ```
+
+## LocalSend reference — protocol and UX, not a Phase 1 implementation requirement
+
+Checked October 10, 2026 against the [LocalSend v2.2 protocol](https://github.com/localsend/protocol) and app source at [commit `14f3a87`](https://github.com/localsend/localsend/commit/14f3a87426eedffaa9d87d011132eca5501abeb8).
+
+- **Normal app-to-app transfer:** direct over the local network; UDP multicast discovery defaults to `224.0.0.167:53317`, with HTTP/TCP subnet scanning as a fallback. The receiver hosts the HTTP API (default TCP port `53317`, configurable). The sender first submits file metadata; the receiver can accept everything, accept a subset, or decline. Only after acceptance does the sender stream accepted file bytes to the receiver. This is a receiver-hosted upload flow, not a cloud relay or a QUIC protocol.
+- **Receiver role and request UI:** the receiver’s local server owns request admission and session state; the app asks the user to accept or decline, choose a destination, and apply per-file options such as skipping or renaming. Progress, cancellation, and history are separate UI states.
+- **Security:** HTTPS with self-signed certificates and SHA-256 certificate fingerprints is the default identity/pinning model, but LocalSend also offers HTTP-only mode. Do not describe encryption as an invariant unless SyncWeave’s own implementation requires it.
+- **Verification, Favorites, and consent are different:** LocalSend’s Verify screen supports a manual fingerprint comparison and does not save a persistent “verified” state. A Favorite is a local saved record (fingerprint, IP, port, alias), not a negotiated or mutual pairing. Optional Quick Save can automatically accept transfers from Favorites, but ordinary transfer acceptance remains a separate receiver decision.
+- **Screens and alternate paths:** Receive, Send, and Settings are distinct areas. Browser “share via link” uses a separate HTTP download path with a QR code; it is not the normal encrypted app-to-app upload path or a pairing handshake.
+- **Version caveat:** the protocol repository includes v3 diagrams proposing signed-key pairing, but the inspected app’s normal route is v2 and its v3 handler is not wired. WebRTC code is present but explicitly disabled in the app. Do not treat the v3 diagrams or WebRTC code as shipped behavior.
+
+**Phase 1 consequence:** the current QR/pairing-like interaction may remain a mock UI, but it must not claim that scanning a QR, comparing a fingerprint, or saving a Favorite establishes cryptographic trust. Keep any future SyncWeave pairing protocol as a separate design decision (key exchange, user confirmation, persistence, revocation, and whether it changes per-transfer consent). LocalSend is a UX/protocol reference, not a mandate to copy its transport.
+
+Primary source links: [v2 receiving routes](https://github.com/localsend/localsend/blob/14f3a87426eedffaa9d87d011132eca5501abeb8/packages/core/src/http/server/v2.rs), [manual Verify screen](https://github.com/localsend/localsend/blob/14f3a87426eedffaa9d87d011132eca5501abeb8/app/lib/pages/verify_page.dart), [Favorite data model](https://github.com/localsend/localsend/blob/14f3a87426eedffaa9d87d011132eca5501abeb8/app/lib/model/persistence/favorite_device.dart), [v3 flow diagram](https://github.com/localsend/protocol/blob/main/v3/http-diagram.mermaid), [WebRTC provider and disabled flag](https://github.com/localsend/localsend/blob/14f3a87426eedffaa9d87d011132eca5501abeb8/app/lib/provider/network/webrtc/signaling_provider.dart).
 
 ## 1. Technology & Project Foundation
 
@@ -199,6 +214,10 @@ Current scenario:
 - [x] Completion state.
 - [x] Workspace state updated after completion.
 - [x] Animated/progressive transfer gauge.
+- [ ] Mock incoming request with sender and file summary.
+- [ ] Mock accept-all, accept-subset, and decline choices before progress starts.
+- [ ] Mock destination selection and per-file skip/rename options.
+- [ ] Keep per-transfer consent visibly separate from identity verification and Favorites.
 - [ ] Dedicated mock transfer service module.
 - [ ] Failure simulation.
 - [ ] Cancellation simulation.
@@ -209,6 +228,8 @@ Current scenario:
 
 **No actual LAN discovery or rendezvous networking.**
 
+For a future real discovery phase, LocalSend provides an example of UDP multicast discovery plus a TCP/HTTP register step and a subnet-scan/manual-address fallback. Discovery is not device pairing or transfer consent, and LocalSend’s defaults are a reference rather than a locked SyncWeave choice.
+
 - [x] Mock online peer state displayed.
 - [x] Mock peer count displayed.
 - [ ] Dedicated peer model/service.
@@ -217,25 +238,19 @@ Current scenario:
 - [ ] Multiple-peer selection.
 - [ ] Peer status animation.
 
-## 10. Device Pairing Workflow (LocalSend-Style)
+## 10. Mock Peer Setup & Identity UX — no pairing protocol
 
-Pairing is still entirely mocked. The target flow is the LocalSend model from the proposed plan: UDP-multicast discovery, a receiver confirmation prompt, and certificate-fingerprint identity with pinning. (The shipped mock modal predates this redesign; unchecked items below track its rewrite.)
+The existing QR/pairing-like experience is entirely simulated: its QR is not an encoded invitation, and its code, authentication, and success states do not create a connection or trusted-peer record. LocalSend’s manual fingerprint Verify flow and local Favorites are not a pairing handshake; transfer acceptance remains a separate receiver decision (see the reference findings above).
 
-- [x] Pairing screen/modal.
-- [x] Pairing visual rendered directly in the TUI.
-- [x] Pairing / verification code display.
-- [x] Connection method display.
-- [x] Authentication-state display.
-- [x] Waiting-for-receiver-confirmation state.
-- [x] Simulated peer discovery/authentication progression.
-- [x] Successful pairing state.
-- [x] `Esc` cancellation.
-- [ ] Mock nearby-devices list with per-device short fingerprints.
-- [ ] Simulate fingerprint mismatch (pinning rejection) on reconnect.
-- [ ] Simulate receiver PIN entry (accepted / rejected / throttled).
-- [ ] Simulate timeout/failure.
-- [ ] Simulate retry.
-- [ ] Persist paired-peer (favorite) state: `fingerprint, ip, port, alias`.
+- [x] Existing peer-setup/pairing-like screen and `Esc` cancellation (visual mock only).
+- [x] Mock QR-like visual and code display (not scannable or a cryptographic identity proof).
+- [x] Mock connection-method and authentication-state labels (no authentication is performed).
+- [x] Simulated waiting/discovery progression without real networking.
+- [ ] Reword the mock success state so it does not claim that a cryptographic pair or trusted relationship was created.
+- [ ] Mock identity verification as a manual comparison, without persisting a “verified” state.
+- [ ] If Favorites are shown, present them as locally remembered destinations, distinct from verified or paired trust.
+- [ ] Simulate timeout/failure and retry states.
+- [ ] Decide whether SyncWeave needs persistent pairing only in a later protocol/security design; define exchange, confirmation, storage, revocation, and consent semantics before implementing it.
 
 ## 11. Diff Inspector
 
@@ -300,7 +315,7 @@ Pairing is still entirely mocked. The target flow is the LocalSend model from th
 
 ## 15. Modal System
 
-- [x] Pairing modal/screen.
+- [x] Mock peer-setup/pairing-like modal/screen (visual only; no trust handshake).
 - [x] Diff modal/screen.
 - [x] Transfer details modal/screen.
 - [ ] Help modal.
@@ -325,11 +340,11 @@ Pairing is still entirely mocked. The target flow is the LocalSend model from th
 ## 17. Complete Mock User Journey
 
 ```text
-Launch
+  Launch
   ↓
 Discover Mock Peer
   ↓
-Pair via Mock Discovery Handshake
+View Mock Peer Setup / Identity UX (no real handshake)
   ↓
 Connected Workspace
   ↓
@@ -339,9 +354,11 @@ Inspect Differences
   ↓
 Select Files / Hunks
   ↓
-Stage Changes
+  Stage Changes
   ↓
 Review Transfer
+  ↓
+Mock Receiver Accepts All / Subset / Declines
   ↓
 Start Mock Sync
   ↓
@@ -363,13 +380,14 @@ Files Become "Synced"
 - [x] Switch panes with `Tab`.
 - [x] Select files with `Space`.
 - [x] Show synchronization states.
-- [x] Open mock pairing experience.
+- [x] Open mock peer-setup/identity experience (simulated only; no trusted pair).
 - [x] Open mock diff experience.
 - [x] Stage a mock diff hunk.
 - [x] Start mock transfer.
 - [x] Show transfer progress/speed/ETA.
 - [x] Complete transfer and mark staged files synced.
-- [ ] Complete real fingerprint-pinned pairing flow.
+- [ ] Label peer setup/identity flows unambiguously as mocked; do not imply a trusted pair.
+- [ ] Complete mock incoming-transfer review and accept-all/subset/decline flow.
 - [ ] Complete responsive mobile layout.
 - [ ] Complete mouse/touch workflow.
 - [ ] Complete reusable animation system.
@@ -400,9 +418,9 @@ Only after Phase 1 approval should mocks be replaced with:
 
 1. Real filesystem access.
 2. Real file comparison.
-3. Real LocalSend-style LAN discovery (UDP multicast + register handshake).
-4. Real peer identity/authentication.
-5. Real QUIC transport.
+3. Choose and document LAN discovery (LocalSend’s UDP multicast + HTTP register is one reference, not a pairing flow).
+4. Define peer identity, authentication, and any persistent pairing/trust semantics separately.
+5. Measure transport options; LocalSend’s normal app-to-app path streams directly over HTTP(S)/TCP, so QUIC is not assumed.
 6. Real chunked transfers.
 7. Real synchronization semantics.
 8. Real persistence/recovery.
