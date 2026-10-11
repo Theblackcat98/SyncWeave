@@ -56,6 +56,8 @@ test("sanitizes traversal, both separator styles, hidden names, reserved names, 
   expect(sanitizePeerBasename("..\\..\\Users\\hostile.txt", 255)).toBe("hostile.txt")
   expect(sanitizePeerBasename(".env", 255)).toBe("env")
   expect(sanitizePeerBasename("CON.txt", 255)).toBe("_CON.txt")
+  expect(() => sanitizePeerBasename("CONtents.txt", 3)).toThrow(TypeError)
+  expect(() => sanitizePeerBasename("LPT1notes.txt", 4)).toThrow(TypeError)
   expect(new TextEncoder().encode(sanitizePeerBasename("very-long-☃-name.txt", 12)).byteLength).toBeLessThanOrEqual(12)
   expect(() => sanitizePeerBasename("../..", 255)).toThrow(TypeError)
 })
@@ -184,7 +186,8 @@ test("fails closed on an existing destination and leaves its bytes unchanged", a
 
 test("does not follow an existing destination symlink or overwrite its target", async () => {
   const directory = await makeDestination()
-  const outside = join(directory, "outside-target.bin")
+  const outsideDirectory = await makeDestination()
+  const outside = join(outsideDirectory, "outside-target.bin")
   const destination = join(directory, "linked.bin")
   const original = new Uint8Array([4, 4, 4])
   const incoming = new Uint8Array([5, 5, 5])
@@ -194,6 +197,19 @@ test("does not follow an existing destination symlink or overwrite its target", 
   await expect(receiveToFile(chunks(incoming, 2), optionsFor(directory, "linked.bin", incoming))).rejects.toMatchObject({ code: "EEXIST" })
   expect(Array.from(await readFile(outside))).toEqual(Array.from(original))
   expect((await readdir(directory)).filter((entry) => entry.startsWith(".syncweave-") && entry.endsWith(".partial"))).toEqual([])
+})
+
+test("cleans up temporary bytes and publishes no final file when the source rejects", async () => {
+  const directory = await makeDestination()
+  const expected = new Uint8Array([1, 2, 3])
+  async function* brokenSource(): AsyncGenerator<Uint8Array> {
+    yield new Uint8Array([1])
+    throw new Error("synthetic stream source failure")
+  }
+
+  await expect(receiveToFile(brokenSource(), optionsFor(directory, "failed.bin", expected))).rejects.toThrow("synthetic stream source failure")
+  expect(await readdir(directory)).toEqual([])
+  await expectNoTemporaryPartials(directory)
 })
 
 test("rejects size and digest mismatches without publishing a final file or leaking partials", async () => {

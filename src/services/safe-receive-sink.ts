@@ -6,9 +6,11 @@ import { dirname, join, resolve } from "node:path"
 /**
  * Filesystem-only receive primitive. This module does not implement transport,
  * peer identity, authentication, discovery, consent, or UI integration.
+ * The caller supplies a trusted, stable destination tree; this utility does not
+ * pin a directory handle or defend against hostile concurrent path replacement.
  */
 export interface SafeReceiveOptions {
-  /** Caller-selected, existing destination directory. */
+  /** Caller-selected, existing destination directory in a caller-trusted tree. */
   destinationDirectory: string
   /** Untrusted peer-provided name; only a bounded, safe leaf name is retained. */
   peerFileName: string
@@ -53,9 +55,14 @@ export class ReceiveIntegrityError extends Error {
 }
 
 const encoder = new TextEncoder()
-const reservedWindowsNames = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i
+const reservedWindowsNames = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|CLOCK\$|COM[1-9¹²³]|LPT[1-9¹²³])$/i
 const temporaryNamePrefix = ".syncweave-"
 const temporaryNameSuffix = ".partial"
+
+function isReservedWindowsBasename(candidate: string): boolean {
+  const deviceName = candidate.split(".", 1)[0]!.replace(/[. ]+$/, "")
+  return reservedWindowsNames.test(deviceName)
+}
 
 function assertNonNegativeSafeInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -106,12 +113,14 @@ export function sanitizePeerBasename(peerFileName: string, maxNameBytes: number)
     throw new TypeError("peerFileName does not contain a usable basename")
   }
 
-  const deviceName = candidate.split(".", 1)[0]!.replace(/[. ]+$/, "")
-  if (reservedWindowsNames.test(deviceName)) candidate = `_${candidate}`
+  if (isReservedWindowsBasename(candidate)) candidate = `_${candidate}`
 
   candidate = truncateUtf8(candidate, maxNameBytes).replace(/[. ]+$/, "")
   if (candidate.length === 0) {
     throw new TypeError("peerFileName is empty after applying the filename bound")
+  }
+  if (isReservedWindowsBasename(candidate)) {
+    throw new TypeError("peerFileName becomes a reserved Windows device name after applying the filename bound")
   }
   return candidate
 }
