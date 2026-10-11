@@ -1,6 +1,6 @@
 # SyncWeave
 
-A keyboard-first, animated terminal UI for reviewing and staging file transfers. The current **Phase 1 build is a deterministic simulation**: it does not access real files, discover peers on a network, send bytes, synchronize directories, persist transfers to disk, or establish a pairing/trust relationship. The receiver-consent UX is informed by LocalSend's documented v2 HTTP(S)/TCP flow, but no UDP multicast discovery, receiver-hosted HTTP(S)/TCP listener, QUIC transport, or pairing handshake is implemented.
+A keyboard-first, animated terminal UI for reviewing and staging file transfers. The current **Phase 1 build is a deterministic simulation**: it does not access real files, discover peers on a network, send bytes, synchronize directories, persist transfers to disk, or establish a pairing/trust relationship. The receiver-consent UX is informed by LocalSend's documented v2 flow, but no network protocol or transport is implemented. The proposed Phase 2 scope in [phase2.md](phase2.md) is direct local-LAN send/receive with per-transfer consent, safe writes, integrity, and recovery; it is a specification only, not implemented.
 
 ## Run
 
@@ -41,7 +41,8 @@ A fingerprint comparison is not stored as verification. A Favorite is a local de
 - `src/ui/` — OpenTUI theme primitives and responsive views
 - `src/ui/animation-clock.ts` — active-only animation ticks with pause/resume/disposal
 - `src/app.ts` — keyboard/mouse event routing and mock workflow state machine
-- `phase1.md` — Phase 1 scope, reference findings, checklist, and completion criteria
+- `phase1.md` — Phase 1 scope, reference findings, checklist, and reconciliation status
+- `phase2.md` — proposed direct-LAN transfer acceptance criteria, Phase 1 TODO crosswalk, and issue dispositions
 
 ## Checks
 
