@@ -1,11 +1,5 @@
 import type { FavoriteDestination, MockPeer } from "../domain.js"
-
-export interface PeerService {
-  discover(): MockPeer[]
-  pulse(): MockPeer[]
-  favorites(): FavoriteDestination[]
-  toggleFavorite(peer: MockPeer): boolean
-}
+import type { PeerService } from "./ports.js"
 
 const mockPeers: MockPeer[] = [
   { id: "macbook", name: "MacBook-M3", host: "192.168.1.42", port: 53317, fingerprint: "SHA-256 7B:21:90:AC:4F:18:DE:72", online: true },

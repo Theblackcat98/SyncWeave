@@ -1,18 +1,17 @@
 import { CliRenderEvents, type CliRenderer, type KeyEvent } from "@opentui/core"
 import type { AppState, ConsentRequest, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
 import { OTHER_PANE } from "./domain.js"
-import { MockFileSystemService } from "./services/mock-filesystem.js"
-import { MockPeerService } from "./services/mock-peer-service.js"
-import { destinations, MockTransferService } from "./services/mock-transfer-service.js"
+import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
 import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
 import { motion } from "./theme.js"
 import { AnimationClock } from "./ui/animation-clock.js"
 import { renderApp } from "./ui/render.js"
 
 export interface AppDependencies {
-  filesystem?: MockFileSystemService
-  peerService?: MockPeerService
-  transferService?: MockTransferService
+  filesystem: FileSystemService
+  peerService: PeerService
+  transferService: TransferService
+  receiveDestinations: readonly [string, ...string[]]
   reducedMotion?: boolean
 }
 
@@ -23,10 +22,8 @@ export interface SyncWeaveApp {
   dispose(): void
 }
 
-export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDependencies = {}): SyncWeaveApp {
-  const filesystem = dependencies.filesystem ?? new MockFileSystemService()
-  const peerService = dependencies.peerService ?? new MockPeerService()
-  const transferService = dependencies.transferService ?? new MockTransferService()
+export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDependencies): SyncWeaveApp {
+  const { filesystem, peerService, transferService, receiveDestinations } = dependencies
   const peers = peerService.discover()
   const state = createInitialAppState(filesystem.paths, dependencies.reducedMotion)
   const clock = new AnimationClock()
@@ -47,6 +44,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       state,
       filesystem,
       peerService,
+      receiveDestinations,
       peers,
       favorites: peerService.favorites(),
       queue: state.transferQueue,
@@ -167,7 +165,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       render()
       return
     }
-    const transfer = transferService.acceptRequest(request, destinations[state.receiveDestinationIndex % destinations.length], accepted)
+    const transfer = transferService.acceptRequest(request, receiveDestinations[state.receiveDestinationIndex % receiveDestinations.length]!, accepted)
     state.activeTransferId = transfer.id
     state.request = request
     state.identityStep = 0
@@ -436,7 +434,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         if (file) file.renamed = !file.renamed
         render(); return
       }
-      case "cycle-destination": state.receiveDestinationIndex = (state.receiveDestinationIndex + 1) % destinations.length; render(); return
+      case "cycle-destination": state.receiveDestinationIndex = (state.receiveDestinationIndex + 1) % receiveDestinations.length; render(); return
       case "consent-all": acceptConsent(true); return
       case "consent-accept": acceptConsent(false); return
       case "consent-decline": declineConsent(); return

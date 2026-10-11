@@ -1,11 +1,5 @@
 import type { MockEntry, Pane } from "../domain.js"
-
-export interface FileSystemService {
-  list(pane: Pane, path: string): MockEntry[]
-  parentPath(path: string): string
-  markSynced(pane: Pane, ids: string[]): void
-  getDiff(id: string): string[]
-}
+import type { FileSystemService } from "./ports.js"
 
 type Tree = Record<Pane, Record<string, MockEntry[]>>
 
