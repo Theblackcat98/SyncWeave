@@ -382,7 +382,7 @@ Mock rows receive a "Synced" label; no disk write occurs
 - [x] Show synchronization states.
 - [x] Open mock peer-setup/identity experience (simulated only; no trusted pair).
 - [x] Open mock diff experience.
-- [x] Stage a mock diff hunk.
+- [ ] Stage a mock diff hunk (Enter stages the whole file; hunk staging is out of scope — see §11).
 - [x] Start mock transfer.
 - [x] Show transfer progress/speed/ETA.
 - [x] Complete transfer and mark staged files synced.
