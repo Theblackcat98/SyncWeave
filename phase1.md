@@ -96,9 +96,9 @@ Explicitly excluded:
 - [x] Activity/transfer status area.
 - [x] Footer action rail.
 - [x] Version display.
-- [x] Mock mDNS status.
+- [x] Mock discovery status.
 - [x] Mock peer count.
-- [ ] Animated mDNS heartbeat.
+- [ ] Animated discovery heartbeat.
 - [ ] Dynamic contextual footer actions.
 - [ ] Responsive resizing.
 
@@ -207,7 +207,7 @@ Current scenario:
 
 ## 9. Mock Peer Discovery
 
-**No actual mDNS or rendezvous networking.**
+**No actual LAN discovery or rendezvous networking.**
 
 - [x] Mock online peer state displayed.
 - [x] Mock peer count displayed.
@@ -217,23 +217,25 @@ Current scenario:
 - [ ] Multiple-peer selection.
 - [ ] Peer status animation.
 
-## 10. QR Pairing Workflow
+## 10. Device Pairing Workflow (LocalSend-Style)
 
-Pairing is still entirely mocked; the current QR is a visual terminal mock rather than a cryptographic QR payload.
+Pairing is still entirely mocked. The target flow is the LocalSend model from the proposed plan: UDP-multicast discovery, a receiver confirmation prompt, and certificate-fingerprint identity with pinning. (The shipped mock modal predates this redesign; unchecked items below track its rewrite.)
 
 - [x] Pairing screen/modal.
-- [x] Terminal QR-like visual rendered directly in the TUI.
-- [x] Pairing code display.
+- [x] Pairing visual rendered directly in the TUI.
+- [x] Pairing / verification code display.
 - [x] Connection method display.
 - [x] Authentication-state display.
-- [x] Waiting-for-peer state.
+- [x] Waiting-for-receiver-confirmation state.
 - [x] Simulated peer discovery/authentication progression.
 - [x] Successful pairing state.
 - [x] `Esc` cancellation.
-- [ ] Integrate `@opentui/qrcode` for a real encoded QR.
+- [ ] Mock nearby-devices list with per-device short fingerprints.
+- [ ] Simulate fingerprint mismatch (pinning rejection) on reconnect.
+- [ ] Simulate receiver PIN entry (accepted / rejected / throttled).
 - [ ] Simulate timeout/failure.
 - [ ] Simulate retry.
-- [ ] Persist paired-peer state.
+- [ ] Persist paired-peer (favorite) state: `fingerprint, ip, port, alias`.
 
 ## 11. Diff Inspector
 
@@ -290,7 +292,7 @@ Pairing is still entirely mocked; the current QR is a visual terminal mock rathe
 - [ ] Pause unnecessary animation while idle.
 - [ ] Transfer pulse.
 - [ ] Braille sub-cell progress gauge.
-- [ ] mDNS heartbeat.
+- [ ] Discovery heartbeat (multicast announce cycle).
 - [ ] Pane focus transition.
 - [ ] Modal reveal.
 - [ ] Success/failure transitions.
@@ -327,7 +329,7 @@ Launch
   ↓
 Discover Mock Peer
   ↓
-Pair via Mock QR Flow
+Pair via Mock Discovery Handshake
   ↓
 Connected Workspace
   ↓
@@ -367,7 +369,7 @@ Files Become "Synced"
 - [x] Start mock transfer.
 - [x] Show transfer progress/speed/ETA.
 - [x] Complete transfer and mark staged files synced.
-- [ ] Complete real encoded QR rendering.
+- [ ] Complete real fingerprint-pinned pairing flow.
 - [ ] Complete responsive mobile layout.
 - [ ] Complete mouse/touch workflow.
 - [ ] Complete reusable animation system.
@@ -398,7 +400,7 @@ Only after Phase 1 approval should mocks be replaced with:
 
 1. Real filesystem access.
 2. Real file comparison.
-3. Real mDNS discovery.
+3. Real LocalSend-style LAN discovery (UDP multicast + register handshake).
 4. Real peer identity/authentication.
 5. Real QUIC transport.
 6. Real chunked transfers.

@@ -20,10 +20,10 @@
 ### Functional Specifications
 
 * **Dual-Pane Interface**: Left panel displays local workspace; right panel displays remote staging/peer filesystem.
-* **Peer Discovery & Routing**: Automatic local peer discovery via mDNS; wide-area networking (WAN) via end-to-end encrypted rendezvous relays.
+* **Peer Discovery & Routing**: Automatic local peer discovery via raw UDP multicast announcements plus a two-way HTTPS register handshake (LocalSend-style — no mDNS/zeroconf); wide-area networking (WAN) via end-to-end encrypted rendezvous relays.
 * **State Annotation**: Real-time visual indicators marking files/directories as added, modified, deleted, or identical.
 * **Inline Syntax Diffing**: Pressing `d` opens an inline side-by-side diff modal highlighting added and deleted lines.
-* **Interactive Terminal QR Authentication**: Renders an interactive QR code using Unicode half-block characters (`[q]`) directly in the terminal to establish cryptographic connections without typing manual keys or tokens.
+* **Zero-Config Pairing (LocalSend-Style)**: Devices discover each other on the local network via UDP-multicast announcements and pair through a trust handshake — the receiver confirms the sender, the sender's certificate fingerprint gets pinned, and an optional receiver PIN gates transfers — establishing cryptographic connections without typing keys or scanning anything.
 * **Selective Batch Transfers**: Multi-file selection via `[Space]` or touch taps, triggering batch transfers via `[s]`.
 * **Transport Engine**: Chunked, multiplexed QUIC or TLS-WebSocket transport layer with Braille-based progress gauges and transfer speed metrics.
 
@@ -42,7 +42,7 @@
 ### Reference TUI Layout
 
 ```text
-╭─ SyncWeave v1.0.0 ────────────────────── [● mDNS: Active] ── [Peers: 2 Online] ─╮
+╭─ SyncWeave v1.0.0 ────────────────── [● LAN Scan: Active] ── [Peers: 2 Online] ─╮
 │                                                                                 │
 │  LOCAL WORKSPACE (~/projects/notes)          REMOTE STAGING (MacBook-M3: ~/notes)│
 │  ╭──────────────────────────────────────╮   ╭──────────────────────────────────╮│
@@ -56,7 +56,7 @@
 │  Progress: ⢄⢂⢁⣀⡠⡐⡐ [██████████████████████░░░░░░░░] 68% • 14.2 MB/s • 0.4s ETA     │
 │                                                                                 │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│ [Space] Toggle Select  │ [s] Sync Staged  │ [d] View Diff  │ [q] QR  │ [?] Help │
+│ [Space] Toggle Select  │ [s] Sync Staged  │ [d] View Diff │ [p] Pair │ [?] Help │
 ╰─────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -85,7 +85,7 @@ All animations must operate on an event-driven tick loop that pauses completely 
 2. **Braille Sub-Cell Progress Gauges**:
    * Instead of standard whole-character jump bars (`[###   ]`), implement high-resolution Braille dot fill (`⣀⣄⣤⣦⣶⣷⣿`) providing 8 vertical subdivisions per character column for smooth sub-percentage rendering.
 3. **P2P Heartbeat Radar**:
-   * In the top-right peer status bar, display an alternating pulse (`[● mDNS]` ➔ `[○ mDNS]`) cycling on a slow 2-second interval to visually signal active peer keepalive checks without cluttering the screen.
+   * In the top-right peer status bar, display an alternating pulse (`[● LAN]` ➔ `[○ LAN]`) cycling on a slow 2-second interval to visually signal active discovery announcements and peer keepalive checks without cluttering the screen.
 4. **Modal Reveal & Focus Transitions**:
    * Fast 2-frame border highlight: When switching panes (`Tab`), flash the focused container's border from dim gray to white before settling on Electric Cyan.
 
@@ -93,23 +93,69 @@ All animations must operate on an event-driven tick loop that pauses completely 
 
 ### C. Context-Guiding UX & Interactive Workflows
 
-#### 1. Onboarding & QR Zero-Config Pairing
+#### 1. Onboarding & Zero-Config Pairing (LocalSend-Style)
 
-* **Initial State**: If no peers are found on the local network, SyncWeave automatically opens an overlay containing an ASCII/half-block QR code centered on the screen.
-* **Auto Contrast Detection**: The QR generator checks terminal background luminance (via OSC 11 / color query) to invert foreground/background half-blocks (`▀`, `▄`, `█`), ensuring the QR code scans reliably across light and dark terminals.
-* **Scan & Link**: Scanning the terminal QR with a phone camera or secondary terminal running `syncweave --join` establishes an authenticated QUIC channel in under 1 second.
+Pairing follows LocalSend's open model: devices find each other on the local
+network by themselves, then build trust with a short handshake over
+certificate fingerprints — no camera, nothing to scan or type.
+
+* **Initial State**: If no paired peers are found, SyncWeave automatically opens the
+  **Nearby Devices** overlay: a live list of discovered peers (alias, device model,
+  short fingerprint) that fills as announcements arrive, with a scanning indicator
+  while the network is probed.
+
+The pairing sequence, step by step:
+
+1. **Identity**: On first launch each device generates a self-signed TLS certificate
+   and keeps it for life. The uppercase-hex SHA-256 of that certificate is the device's
+   **fingerprint** — its one true identity. Fingerprints, never IP addresses, are what
+   is displayed, compared, and trusted.
+2. **Discovery**: Each device binds a fixed UDP port, joins a multicast group, and
+   announces itself as a small JSON datagram (alias, model, fingerprint, port), sent as
+   a rapid burst to survive packet loss — plain UDP multicast, deliberately *not*
+   mDNS/zeroconf. A device that hears an announcement answers over HTTPS (not UDP) by
+   `POST`-ing its own device info back to the announcer, so discovery is two-way and
+   both Nearby lists fill within a second. Networks that block multicast fall back to
+   a subnet sweep of direct `POST /register` probes; already-paired peers are probed
+   at their remembered address first.
+3. **Pick a peer (first contact — trust on first use)**: The sender highlights a device
+   in the Nearby list and presses `[Enter]`. During this very first contact the peer's
+   certificate is accepted sight-unseen so the handshake can complete — nothing is
+   trusted implicitly, because the human is the trust anchor on both sides (step 4).
+4. **Confirm on the receiver**: The receiving device pops a modal naming the sender
+   ("`MacBook-M3` wants to pair and send files — Accept?"). The session exists only
+   after the receiver accepts, and every later incoming transfer meets the same
+   accept prompt.
+5. **Verify visually (optional)**: On a hostile network — or on first contact, where
+   no fingerprint is pinned yet — both screens can display the same short verification
+   sequence derived from the two fingerprints (sorted, joined, SHA-256 → a row of
+   glyphs or hex groups). Matching screens mean no impostor sits in the middle.
+6. **Stay paired (fingerprint pinning)**: An accepted peer is saved as a favorite
+   (`fingerprint, ip, port, alias`). Every later session pins the TLS handshake to the
+   remembered fingerprint: a mismatched certificate aborts the handshake before any
+   metadata or file bytes move, so a previously paired device cannot be impersonated
+   even if an attacker takes over its old IP. Hostnames are ignored — peers are
+   addressed by IP and identified by fingerprint.
+7. **Optional receiver PIN**: The receiver may set a PIN that gates incoming transfer
+   sessions. A wrong PIN answers `401`; after three failures from one IP, that IP is
+   throttled with `429`. The PIN is a capability gate only and never derives keys —
+   confidentiality lives in TLS, identity lives in the pinned fingerprint.
 
 ```text
-╭─ Peer Pairing (Scan with Camera or Termux) ──────────╮
-│                                                      │
-│    ▄▄▄▄▄▄▄ ▄▄   ▄▄▄▄ ▄▄▄▄▄▄▄    Code: 8492-AXQ1      │
-│    █ ▄▄▄ █ █▀▀██▄ █ █ ▄▄▄ █    Relay: Direct P2P    │
-│    █ ███ █ █▀██▀ █ █ █ ███ █    Auth: Ed25519 Ephem  │
-│    █▄▄▄▄▄█ █ █ █ ▀ █ █▄▄▄▄▄█                         │
-│    ▄▄▄▄  ▄ █▀▄█▄▀█▀▄ ▄▄▄ ▄▄▄    Waiting for peer...  │
-│    ██▄▀██▄▀▄▄ ▄█▄▄▄▀█▄█▀▄ ▄█    [Esc] Cancel         │
-│                                                      │
-╰──────────────────────────────────────────────────────╯
+╭─ Nearby Devices ─────────────────────────────────────────────────────╮
+│                                                                      │
+│   ●  MacBook-M3          a3f2…9c41     ◇ new peer — not paired yet   │
+│   ○  Pixel-8-Termux      7b90…e2d3     ♥ paired (fingerprint pinned) │
+│   ◌  scanning LAN…                                                   │
+│                                                                      │
+│   Pairing with MacBook-M3                                            │
+│   State : Waiting for receiver confirmation…                         │
+│   Verify: ▲ ◆ ● ■ ★ ▲ ◆ ●   ← identical on both screens              │
+│   PIN   : ____   (only if the receiver set one)                      │
+│                                                                      │
+│         [Enter] Pair      [v] Verify      [Esc] Cancel               │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯
 ```
 
 #### 2. Visual Split-Diff Inspector (`[d]`)
