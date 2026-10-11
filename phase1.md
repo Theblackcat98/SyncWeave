@@ -61,12 +61,12 @@ Primary source links: [v2 receiving routes](https://github.com/localsend/localse
 - [x] Add TypeScript configuration.
 - [x] Add Bun development/start scripts.
 - [x] Establish `src/main.ts` OpenTUI entry point.
-- [ ] Extract dedicated UI component modules.
-- [ ] Extract dedicated application-state module.
-- [ ] Extract dedicated mock-service modules.
-- [ ] Define interfaces separating UI/domain state from future real services.
-- [ ] Add automated typecheck/CI validation.
-- [ ] Add automated startup/smoke test.
+- [x] Extract dedicated UI component modules.
+- [x] Extract dedicated application-state module.
+- [x] Extract dedicated mock-service modules.
+- [x] Define interfaces separating UI/domain state from future real services.
+- [x] Add automated typecheck/CI validation.
+- [x] Add automated startup/smoke test.
 
 Explicitly excluded:
 
@@ -89,17 +89,17 @@ Explicitly excluded:
 - [x] Coral deleted/error `#F87171`.
 - [x] Muted synchronized state `#64748B` / `#94A3B8`.
 - [x] Focused-row treatment.
-- [ ] Extract design tokens into a dedicated theme module.
-- [ ] Define typography hierarchy and spacing tokens.
-- [ ] Define reusable border/component styles.
-- [ ] Define disabled/loading/inactive states.
+- [x] Extract design tokens into a dedicated theme module.
+- [x] Define typography hierarchy and spacing tokens.
+- [x] Define reusable border/component styles.
+- [x] Define disabled/loading/inactive states.
 
 ### Terminal rendering
 
 - [x] Unicode synchronization-state glyphs.
 - [x] Nerd Font file icons.
-- [ ] ASCII icon fallback.
-- [ ] Verify desktop terminal rendering.
+- [x] ASCII icon fallback.
+- [x] Verify desktop terminal rendering.
 - [ ] Verify Termux rendering.
 - [ ] Audit Android glyph compatibility.
 
@@ -113,9 +113,9 @@ Explicitly excluded:
 - [x] Version display.
 - [x] Mock discovery status.
 - [x] Mock peer count.
-- [ ] Animated discovery heartbeat.
-- [ ] Dynamic contextual footer actions.
-- [ ] Responsive resizing.
+- [x] Animated discovery heartbeat.
+- [x] Dynamic contextual footer actions.
+- [x] Responsive resizing.
 
 ## 4. Dual-Pane Workspace
 
@@ -128,9 +128,9 @@ Explicitly excluded:
 - [x] Synchronization state.
 - [x] Selection state.
 - [x] Keyboard navigation.
-- [ ] Directory navigation.
-- [ ] Scrolling for larger datasets.
-- [ ] Mouse/touch selection.
+- [x] Directory navigation.
+- [x] Scrolling for larger datasets.
+- [x] Mouse/touch selection.
 
 ### Remote
 
@@ -147,8 +147,8 @@ Explicitly excluded:
 - [x] `Tab` pane switching.
 - [x] Focused-pane border treatment.
 - [x] Independent pane selection.
-- [ ] Animated focus transition.
-- [ ] Mouse/touch pane switching.
+- [x] Animated focus transition.
+- [x] Mouse/touch pane switching.
 
 ## 5. Mock Filesystem
 
@@ -158,8 +158,8 @@ Explicitly excluded:
 - [x] File sizes and byte counts.
 - [x] Synced/added/modified/deleted state model.
 - [x] Multiple selectable files.
-- [ ] Explicit directory nodes.
-- [ ] Directory traversal.
+- [x] Explicit directory nodes.
+- [x] Directory traversal.
 - [ ] Rich metadata.
 - [ ] Configurable mock scenarios.
 
@@ -183,7 +183,7 @@ Current scenario:
 - [x] Semantic state colors.
 - [x] State displayed directly in rows.
 - [ ] Conflict state.
-- [ ] State legend/help.
+- [x] State legend/help.
 - [ ] State transition animations.
 
 ## 7. File Selection & Staging
@@ -195,10 +195,10 @@ Current scenario:
 - [x] Aggregate selected-file count.
 - [x] Prevent sync when nothing is staged.
 - [x] Show aggregate selected size in transfer UI.
-- [ ] Select all.
-- [ ] Deselect all.
+- [x] Select all.
+- [x] Deselect all.
 - [x] Staged-transfer workflow UI.
-- [ ] Explicit pre-transfer confirmation.
+- [x] Explicit pre-transfer confirmation.
 
 ## 8. Mock Transfer Experience
 
@@ -214,14 +214,14 @@ Current scenario:
 - [x] Completion state.
 - [x] Workspace state updated after completion.
 - [x] Animated/progressive transfer gauge.
-- [ ] Mock incoming request with sender and file summary.
-- [ ] Mock accept-all, accept-subset, and decline choices before progress starts.
-- [ ] Mock destination selection and per-file skip/rename options.
-- [ ] Keep per-transfer consent visibly separate from identity verification and Favorites.
-- [ ] Dedicated mock transfer service module.
-- [ ] Failure simulation.
-- [ ] Cancellation simulation.
-- [ ] Retry simulation.
+- [x] Mock incoming request with sender and file summary.
+- [x] Mock accept-all, accept-subset, and decline choices before progress starts.
+- [x] Mock destination selection and per-file skip/rename options.
+- [x] Keep per-transfer consent visibly separate from identity verification and Favorites.
+- [x] Dedicated mock transfer service module.
+- [x] Failure simulation.
+- [x] Cancellation simulation.
+- [x] Retry simulation.
 - [ ] Persistent transfer queue.
 
 ## 9. Mock Peer Discovery
@@ -232,11 +232,11 @@ For a future real discovery phase, LocalSend provides an example of UDP multicas
 
 - [x] Mock online peer state displayed.
 - [x] Mock peer count displayed.
-- [ ] Dedicated peer model/service.
-- [ ] Simulated peer appearance/disappearance.
+- [x] Dedicated peer model/service.
+- [x] Simulated peer appearance/disappearance.
 - [ ] Simulated connection establishment/failure.
-- [ ] Multiple-peer selection.
-- [ ] Peer status animation.
+- [x] Multiple-peer selection.
+- [x] Peer status animation.
 
 ## 10. Mock Peer Setup & Identity UX — no pairing protocol
 
@@ -246,10 +246,10 @@ The existing QR/pairing-like experience is entirely simulated: its QR is not an 
 - [x] Mock QR-like visual and code display (not scannable or a cryptographic identity proof).
 - [x] Mock connection-method and authentication-state labels (no authentication is performed).
 - [x] Simulated waiting/discovery progression without real networking.
-- [ ] Reword the mock success state so it does not claim that a cryptographic pair or trusted relationship was created.
-- [ ] Mock identity verification as a manual comparison, without persisting a “verified” state.
-- [ ] If Favorites are shown, present them as locally remembered destinations, distinct from verified or paired trust.
-- [ ] Simulate timeout/failure and retry states.
+- [x] Reword the mock success state so it does not claim that a cryptographic pair or trusted relationship was created.
+- [x] Mock identity verification as a manual comparison, without persisting a “verified” state.
+- [x] If Favorites are shown, present them as locally remembered destinations, distinct from verified or paired trust.
+- [x] Simulate timeout/failure and retry states.
 - [ ] Decide whether SyncWeave needs persistent pairing only in a later protocol/security design; define exchange, confirmation, storage, revocation, and consent semantics before implementing it.
 
 ## 11. Diff Inspector
@@ -274,42 +274,42 @@ The existing QR/pairing-like experience is entirely simulated: its QR is not an 
 
 - [x] Dual-pane desktop target.
 - [ ] Full metadata/breadcrumb treatment.
-- [ ] Responsive sizing rules.
+- [x] Responsive sizing rules.
 
 ### Narrow — <90 columns
 
-- [ ] Collapse to single active pane.
-- [ ] `[Local] | [Remote]` tabs.
-- [ ] Preserve state/selection/actions.
-- [ ] Reduce metadata density.
+- [x] Collapse to single active pane.
+- [x] `[Local] | [Remote]` tabs.
+- [x] Preserve state/selection/actions.
+- [x] Reduce metadata density.
 
 ### Very narrow / soft keyboard
 
-- [ ] Detect reduced viewport.
-- [ ] Collapse unnecessary headers/breadcrumbs.
-- [ ] Preserve file-list height and essential actions.
+- [x] Detect reduced viewport.
+- [x] Collapse unnecessary headers/breadcrumbs.
+- [x] Preserve file-list height and essential actions.
 
 ## 13. Touch & Mouse Interaction
 
-- [ ] OpenTUI mouse handling.
-- [ ] Primary-click normalization.
-- [ ] Click file rows.
-- [ ] Click action controls.
-- [ ] Click pane tabs.
-- [ ] Click modal controls.
+- [x] OpenTUI mouse handling.
+- [x] Primary-click normalization.
+- [x] Click file rows.
+- [x] Click action controls.
+- [x] Click pane tabs.
+- [x] Click modal controls.
 - [ ] Validate Termux touch behavior.
 - [x] Keyboard workflow remains fully available.
 
 ## 14. Animation System
 
 - [x] Progressive mock-transfer animation.
-- [ ] Reusable OpenTUI animation/tick primitives.
-- [ ] Pause unnecessary animation while idle.
-- [ ] Transfer pulse.
-- [ ] Braille sub-cell progress gauge.
-- [ ] Discovery heartbeat (multicast announce cycle).
-- [ ] Pane focus transition.
-- [ ] Modal reveal.
+- [x] Reusable OpenTUI animation/tick primitives.
+- [x] Pause unnecessary animation while idle.
+- [x] Transfer pulse.
+- [x] Braille sub-cell progress gauge.
+- [x] Mock discovery heartbeat animation (no multicast or networking).
+- [x] Pane focus transition.
+- [x] Modal reveal.
 - [ ] Success/failure transitions.
 - [ ] Validate idle CPU behavior.
 
@@ -330,11 +330,11 @@ The existing QR/pairing-like experience is entirely simulated: its QR is not an 
 
 - [x] Footer shortcut guidance.
 - [x] Basic `?` contextual status guidance.
-- [ ] Dedicated help screen.
-- [ ] File-state legend.
-- [ ] Peer-state legend.
-- [ ] Transfer-state legend.
-- [ ] Mobile interaction guidance.
+- [x] Dedicated help screen.
+- [x] File-state legend.
+- [x] Peer-state legend.
+- [x] Transfer-state legend.
+- [x] Mobile interaction guidance.
 - [ ] First-launch onboarding.
 
 ## 17. Complete Mock User Journey
@@ -386,28 +386,28 @@ Files Become "Synced"
 - [x] Start mock transfer.
 - [x] Show transfer progress/speed/ETA.
 - [x] Complete transfer and mark staged files synced.
-- [ ] Label peer setup/identity flows unambiguously as mocked; do not imply a trusted pair.
-- [ ] Complete mock incoming-transfer review and accept-all/subset/decline flow.
-- [ ] Complete responsive mobile layout.
-- [ ] Complete mouse/touch workflow.
-- [ ] Complete reusable animation system.
+- [x] Label peer setup/identity flows unambiguously as mocked; do not imply a trusted pair.
+- [x] Complete mock incoming-transfer review and accept-all/subset/decline flow.
+- [x] Complete responsive mobile layout.
+- [x] Complete mouse/touch workflow.
+- [x] Complete reusable animation system.
 
 ## 18. UX Polish Pass
 
-- [ ] Normalize spacing.
-- [ ] Normalize borders.
-- [ ] Normalize icons/fallbacks.
-- [ ] Normalize state colors.
-- [ ] Review keyboard navigation.
-- [ ] Review touch interaction.
-- [ ] Review responsive layouts.
-- [ ] Review empty/loading/error states.
-- [ ] Review transitions and animation timing.
-- [ ] Reduce visual noise.
-- [ ] Ensure visual hierarchy is obvious without documentation.
-- [ ] Test desktop terminal.
+- [x] Normalize spacing.
+- [x] Normalize borders.
+- [x] Normalize icons/fallbacks.
+- [x] Normalize state colors.
+- [x] Review keyboard navigation.
+- [x] Review touch interaction.
+- [x] Review responsive layouts.
+- [x] Review empty/loading/error states.
+- [x] Review transitions and animation timing.
+- [x] Reduce visual noise.
+- [x] Ensure visual hierarchy is obvious without documentation.
+- [x] Test desktop terminal.
 - [ ] Test Termux.
-- [ ] Test narrow portrait layouts.
+- [x] Test narrow portrait layouts.
 - [ ] Test light/dark terminal backgrounds.
 
 ## 19. Phase 1 Definition of Done
@@ -426,3 +426,11 @@ Only after Phase 1 approval should mocks be replaced with:
 8. Real persistence/recovery.
 
 **Principle:** build the experience first; connect the machinery second.
+
+## Implementation and validation status
+
+The Phase 1 workflow is implemented as a **deterministic, in-memory simulation** using page-based screens rather than modal overlays. The screens model request review, receiver consent, subset/rename/destination options, and accepted-transfer progress; help, confirmation, error, and peer-selection overlay dialogs are not implemented. These screens do not implement LocalSend v2 or any other network transport. No UDP multicast, receiver HTTP(S)/TCP listener, real file access or byte streaming, QUIC, pairing protocol, trust persistence, synchronization, or cross-session transfer history is present. Local Favorites and queue records reset with the process.
+
+Validation performed with Bun 1.4.3: frozen-lockfile install, TypeScript typecheck, 16 automated tests (keyboard, mouse, wide/narrow/portrait UI, consent, completion, failure/retry, identity/Favorites, animation clock, and ASCII icons), dedicated headless smoke script, and a live terminal launch/clean Ctrl+C exit. Headless layouts were inspected at 120x36, 72x24, 48x24, and 44x32.
+
+Manual validation still needed on Termux/physical Android touch input and broader Android font coverage. Light-terminal themes and idle CPU measurements were not validated. Intentionally deferred checklist items—including real discovery/transport, pairing/security design, rich metadata, conflict detection, real diffing, onboarding, and cross-session persistence—remain unchecked.
