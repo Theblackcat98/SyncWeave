@@ -38,6 +38,8 @@ Record and review these decisions before starting the related network or filesys
 
 These are **gates**, not assumptions filled in by this document. Until a platform or protocol choice is recorded, dependent tests must be marked blocked or unverified rather than passed.
 
+Recommendations in the research report for platform support, discovery, first-contact authentication, and resource caps remain **provisional candidates**, not accepted decisions, until the throwaway two-peer TLS/SAS spike passes (both peers show the same session-bound code; no metadata is sent until both users confirm; mismatches and redirects are rejected; TLS verification stays strict) and acceptance review approves them.
+
 ## Acceptance criteria
 
 ### 1. Direct transfer flow and consent
