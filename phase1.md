@@ -250,18 +250,18 @@ The existing QR/pairing-like experience is entirely simulated: its QR is not an 
 - [x] Mock identity verification as a manual comparison, without persisting a “verified” state.
 - [x] If Favorites are shown, present them as locally remembered destinations, distinct from verified or paired trust.
 - [x] Simulate timeout/failure and retry states.
-- [ ] Decide whether SyncWeave needs persistent pairing only in a later protocol/security design; define exchange, confirmation, storage, revocation, and consent semantics before implementing it.
+- [ ] If persistent pairing is ever proposed, define exchange, confirmation, storage, revocation/key rotation, and consent semantics in a separate reviewed protocol/security design; Phase 2 explicitly excludes it.
 
 ## 11. Diff Inspector
 
 - [x] `d` opens an actual diff screen for modified files.
-- [x] Side-by-side mock diff content.
+- [ ] Side-by-side mock diff content (the current screen is a single linear list).
 - [x] Line numbers/change markers.
 - [x] Added lines.
 - [x] Removed lines.
 - [x] Modified sections.
 - [x] Hunk navigation placeholder with `Tab`.
-- [x] Mock hunk staging with `Enter`.
+- [ ] Stage an individual mock hunk with `Enter` (current behavior stages the whole file).
 - [x] `Esc` dismissal.
 - [ ] Real diff engine integration.
 - [ ] Syntax highlighting.
@@ -346,7 +346,7 @@ Discover Mock Peer
   ↓
 View Mock Peer Setup / Identity UX (no real handshake)
   ↓
-Connected Workspace
+Mock Workspace (no authenticated connection)
   ↓
 Browse Local / Remote Files
   ↓
@@ -360,7 +360,7 @@ Review Transfer
   ↓
 Mock Receiver Accepts All / Subset / Declines
   ↓
-Start Mock Sync
+Start Mock Transfer (simulation)
   ↓
 Watch Animated Transfer
   ↓
@@ -368,7 +368,7 @@ Transfer Completes
   ↓
 Workspace Updates
   ↓
-Files Become "Synced"
+Mock rows receive a "Synced" label; no disk write occurs
 ```
 
 ### Progress
@@ -389,7 +389,7 @@ Files Become "Synced"
 - [x] Label peer setup/identity flows unambiguously as mocked; do not imply a trusted pair.
 - [x] Complete mock incoming-transfer review and accept-all/subset/decline flow.
 - [x] Complete responsive mobile layout.
-- [x] Complete mouse/touch workflow.
+- [x] Complete tested desktop/headless mouse workflow; physical touch is a separate platform check.
 - [x] Complete reusable animation system.
 
 ## 18. UX Polish Pass
@@ -399,7 +399,7 @@ Files Become "Synced"
 - [x] Normalize icons/fallbacks.
 - [x] Normalize state colors.
 - [x] Review keyboard navigation.
-- [x] Review touch interaction.
+- [x] Review tested mouse interaction; physical touch remains unverified until the platform check.
 - [x] Review responsive layouts.
 - [x] Review empty/loading/error states.
 - [x] Review transitions and animation timing.
@@ -412,18 +412,13 @@ Files Become "Synced"
 
 ## 19. Phase 1 Definition of Done
 
-Phase 1 is complete when a user can experience the entire SyncWeave workflow with **zero real networking or synchronization** and the UI is polished enough to become the product's visual contract.
+Phase 1 establishes a mock-only terminal experience with **zero real networking or synchronization**. The current mock UI is a passing baseline, but this does not make every historical checklist item complete; the unsupported diff checkmarks above have been corrected, and all remaining work is dispositioned in [phase2.md](phase2.md).
 
-Only after Phase 1 approval should mocks be replaced with:
+### Phase 2 — accepted scope default
 
-1. Real filesystem access.
-2. Real file comparison.
-3. Choose and document LAN discovery (LocalSend’s UDP multicast + HTTP register is one reference, not a pairing flow).
-4. Define peer identity, authentication, and any persistent pairing/trust semantics separately.
-5. Measure transport options; LocalSend’s normal app-to-app path streams directly over HTTP(S)/TCP, so QUIC is not assumed.
-6. Real chunked transfers.
-7. Real synchronization semantics.
-8. Real persistence/recovery.
+Phase 2 replaces only the mocks needed for direct local-LAN send/receive of user-selected files: peer discovery or a documented manual fallback, session-scoped peer authentication, explicit consent for every incoming transfer, safe writes, integrity verification, cancellation, and recovery. Ongoing two-way folder synchronization, deletion/conflict propagation, persistent pairing, and auto-accept are excluded. Platform support, discovery, transport, and first-contact authentication remain explicit design gates; LocalSend informs the checklist but does not select SyncWeave's protocol, port, or transport.
+
+See [phase2.md](phase2.md) for testable acceptance criteria, release gates, and the Phase 1/issue crosswalk.
 
 **Principle:** build the experience first; connect the machinery second.
 
@@ -431,6 +426,6 @@ Only after Phase 1 approval should mocks be replaced with:
 
 The Phase 1 workflow is implemented as a **deterministic, in-memory simulation** using page-based screens rather than modal overlays. The screens model request review, receiver consent, subset/rename/destination options, and accepted-transfer progress; help, confirmation, error, and peer-selection overlay dialogs are not implemented. These screens do not implement LocalSend v2 or any other network transport. No UDP multicast, receiver HTTP(S)/TCP listener, real file access or byte streaming, QUIC, pairing protocol, trust persistence, synchronization, or cross-session transfer history is present. Local Favorites and queue records reset with the process.
 
-Validation performed with Bun 1.4.3: frozen-lockfile install, TypeScript typecheck, 16 automated tests (keyboard, mouse, wide/narrow/portrait UI, consent, completion, failure/retry, identity/Favorites, animation clock, and ASCII icons), dedicated headless smoke script, and a live terminal launch/clean Ctrl+C exit. Headless layouts were inspected at 120x36, 72x24, 48x24, and 44x32.
+The Phase 1 record reports Bun 1.4.3 frozen-lockfile install, TypeScript typecheck, 16 automated tests, a 9-test headless smoke script, and an earlier live terminal launch/clean Ctrl+C exit. This reconciliation independently reran the frozen install, typecheck, 16 tests, and 9 smoke tests successfully at the baseline commit. Headless layouts were inspected at 120x36, 72x24, 48x24, and 44x32; none of these checks exercises real LAN or filesystem behavior.
 
-Manual validation still needed on Termux/physical Android touch input and broader Android font coverage. Light-terminal themes and idle CPU measurements were not validated. Intentionally deferred checklist items—including real discovery/transport, pairing/security design, rich metadata, conflict detection, real diffing, onboarding, and cross-session persistence—remain unchecked.
+Manual Termux/physical Android touch input and broader Android font coverage remain unverified; light-terminal themes and idle CPU measurements were not validated by the Phase 1 run. The original checklist had 26 unchecked items; code audit found two checked diff items unsupported by the implementation, so both are now unchecked and the Phase 1 list has 28 unresolved entries. [phase2.md](phase2.md) maps each remaining entry and issues #2–#8. Only issue #2 is complete; #3, #7, and #8 remain in scope, while #4–#6 are intentionally deferred and remain open. No mock or decorative UI is evidence of real discovery, peer authentication, transfer, safe writes, integrity, or recovery.
