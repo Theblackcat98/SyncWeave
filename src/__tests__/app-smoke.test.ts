@@ -3,14 +3,26 @@ import { BoxRenderable, type KeyEvent } from "@opentui/core"
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
 import { createSyncWeaveApp, type AppDependencies, type SyncWeaveApp } from "../app.js"
 import { MockFileSystemService } from "../services/mock-filesystem.js"
+import { MockPeerService } from "../services/mock-peer-service.js"
+import { mockDestinations, MockTransferService } from "../services/mock-transfer-service.js"
 
 process.env.SYNCWEAVE_REDUCED_MOTION = "1"
 
 const open: Array<{ setup: TestRendererSetup; app: SyncWeaveApp }> = []
 
-async function mount(width = 120, height = 36, dependencies: AppDependencies = {}) {
+function mockDependencies(overrides: Partial<AppDependencies> = {}): AppDependencies {
+  return {
+    filesystem: new MockFileSystemService(),
+    peerService: new MockPeerService(),
+    transferService: new MockTransferService(),
+    receiveDestinations: mockDestinations,
+    ...overrides,
+  }
+}
+
+async function mount(width = 120, height = 36, dependencies: Partial<AppDependencies> = {}) {
   const setup = await createTestRenderer({ width, height })
-  const app = createSyncWeaveApp(setup.renderer, dependencies)
+  const app = createSyncWeaveApp(setup.renderer, mockDependencies(dependencies))
   open.push({ setup, app })
   await setup.flush()
   return { setup, app }
@@ -86,6 +98,33 @@ test("staging and review never stream before a per-transfer consent decision", a
   await setup.flush()
   expect(app.state.screen).toBe("workspace")
   expect(app.state.transferQueue[0]?.status).toBe("declined")
+})
+
+test("the app uses its injected transfer port and waits for explicit consent before enqueueing", async () => {
+  const dependencies = mockDependencies()
+  const calls: string[] = []
+  const transferService = new Proxy(dependencies.transferService, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      if (typeof value !== "function") return value
+      return (...args: unknown[]) => {
+        calls.push(String(property))
+        return Reflect.apply(value, target, args)
+      }
+    },
+  })
+  const { setup, app } = await mount(120, 36, { ...dependencies, transferService })
+
+  setup.mockInput.pressKey("i")
+  await setup.flush()
+  expect(calls).toContain("createRequest")
+  expect(calls).not.toContain("acceptRequest")
+  expect(app.state.transferQueue).toHaveLength(0)
+
+  setup.mockInput.pressEnter()
+  await setup.flush()
+  expect(calls).toContain("acceptRequest")
+  expect(app.state.transferQueue[0]?.acceptedFiles).toHaveLength(3)
 })
 
 test("accepts an incoming subset, records simulated failure, and retries without network access", async () => {

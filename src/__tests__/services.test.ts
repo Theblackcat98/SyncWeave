@@ -2,9 +2,10 @@ import { expect, test } from "bun:test"
 import { MockFileSystemService } from "../services/mock-filesystem.js"
 import { MockPeerService } from "../services/mock-peer-service.js"
 import { MockTransferService } from "../services/mock-transfer-service.js"
+import type { FileSystemService, PeerService, TransferService } from "../services/ports.js"
 
 test("mock filesystem instances isolate state and stage only explicitly synced file ids", () => {
-  const first = new MockFileSystemService()
+  const first: FileSystemService = new MockFileSystemService()
   const second = new MockFileSystemService()
   first.markSynced("local", ["architecture"])
   expect(first.list("local", first.paths.local)[0]?.state).toBe("synced")
@@ -13,8 +14,9 @@ test("mock filesystem instances isolate state and stage only explicitly synced f
 })
 
 test("transfer request stays out of the queue until a receiver explicitly accepts", () => {
-  const peers = new MockPeerService().discover()
-  const service = new MockTransferService()
+  const peerService: PeerService = new MockPeerService()
+  const peers = peerService.discover()
+  const service: TransferService = new MockTransferService()
   const request = service.createRequest("incoming", peers[0]!, [
     { id: "one", name: "one.txt", bytes: 1_024 },
     { id: "two", name: "two.png", bytes: 2_048 },

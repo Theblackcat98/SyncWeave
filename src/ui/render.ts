@@ -1,11 +1,10 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
 import type { AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
 import { formatBytes, OTHER_PANE } from "../domain.js"
-import type { FileSystemService } from "../services/mock-filesystem.js"
-import type { PeerService } from "../services/mock-peer-service.js"
-import { destinations, statusLabel, totalBytes } from "../services/mock-transfer-service.js"
+import type { FileSystemService, PeerService } from "../services/ports.js"
 import { icons, motion, theme } from "../theme.js"
 import { actionButton, actionRow, label, panel, progressGauge, stateColor, stateGlyph, truncate, type CommandHandler } from "./primitives.js"
+import { statusLabel, totalBytes } from "./transfer-presentation.js"
 
 export interface RenderActions {
   command: CommandHandler
@@ -19,8 +18,9 @@ export interface RenderActions {
 export interface RenderData {
   renderer: CliRenderer
   state: AppState
-  filesystem: FileSystemService & { paths: Record<Pane, string> }
+  filesystem: FileSystemService
   peerService: PeerService
+  receiveDestinations: readonly [string, ...string[]]
   peers: MockPeer[]
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
@@ -265,7 +265,7 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
   }
   card.add(label(renderer, "consent-sender", `${request.mode === "incoming" ? "Sender" : "Mock receiver"}: ${request.peer.name}  ·  ${request.peer.host}:${request.peer.port}`, theme.color.remote))
   card.add(label(renderer, "consent-count", `${request.files.length} proposed  ·  ${request.files.filter((file) => file.accepted).length} selected  ·  ${totalBytes(request.files.filter((file) => file.accepted))}`, theme.color.white))
-  card.add(label(renderer, "consent-destination", `Destination: ${destinations[state.receiveDestinationIndex % destinations.length]}  [D] change`, theme.color.muted))
+  card.add(label(renderer, "consent-destination", `Destination: ${data.receiveDestinations[state.receiveDestinationIndex % data.receiveDestinations.length]}  [D] change`, theme.color.muted))
   card.add(label(renderer, "consent-scope", "Review every item. Nothing streams until you accept this transfer.", theme.color.warning))
   const list = panel(renderer, "consent-file-list", { flexDirection: "column", flexGrow: 1, minHeight: 1, marginTop: 1 })
   request.files.forEach((file, index) => list.add(renderConsentFile(renderer, file, index, state, actions, width)))

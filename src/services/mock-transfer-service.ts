@@ -1,19 +1,7 @@
-import type { ConsentFile, ConsentMode, ConsentRequest, MockPeer, Pane, TransferRecord, TransferStatus } from "../domain.js"
-import { formatBytes } from "../domain.js"
+import type { ConsentFile, ConsentMode, ConsentRequest, MockPeer, Pane, TransferRecord } from "../domain.js"
+import type { TransferService } from "./ports.js"
 
-export interface TransferService {
-  createRequest(mode: ConsentMode, peer: MockPeer, files: Array<Pick<ConsentFile, "id" | "name" | "bytes">>, sourcePane?: Pane): ConsentRequest
-  acceptRequest(request: ConsentRequest, destination: string, accepted: ConsentFile[]): TransferRecord
-  declineRequest(request: ConsentRequest): TransferRecord
-  queue(): TransferRecord[]
-  progress(id: string, step: number): TransferRecord | undefined
-  finish(id: string): TransferRecord | undefined
-  cancel(id: string): TransferRecord | undefined
-  fail(id: string, message: string): TransferRecord | undefined
-  retry(id: string): TransferRecord | undefined
-}
-
-export const destinations = ["~/Downloads/SyncWeave", "~/Documents/Shared", "~/Desktop/Inbox"] as const
+export const mockDestinations = ["~/Downloads/SyncWeave", "~/Documents/Shared", "~/Desktop/Inbox"] as const
 
 export class MockTransferService implements TransferService {
   private readonly records: TransferRecord[] = []
@@ -125,21 +113,6 @@ export function transferSummary(record: TransferRecord): string {
   if (!count) return "No files selected"
   const label = `${count} file${count === 1 ? "" : "s"}`
   return `${label} · ${record.peerName} · ${record.destination}`
-}
-
-export function statusLabel(status: TransferStatus): string {
-  return {
-    queued: "Queued",
-    transferring: "Transferring",
-    complete: "Complete",
-    declined: "Declined",
-    cancelled: "Cancelled",
-    failed: "Failed",
-  }[status]
-}
-
-export function totalBytes(files: ConsentFile[]): string {
-  return formatBytes(files.reduce((sum, file) => sum + file.bytes, 0))
 }
 
 function copy(record: TransferRecord): TransferRecord {
