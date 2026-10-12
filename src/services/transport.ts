@@ -527,6 +527,12 @@ export interface ListenerOptions {
   host: string
   port?: number
   signal?: AbortSignal
+  /**
+   * Handshake deadline in ms, measured from socket accept (default
+   * HANDSHAKE_TIMEOUT_MS). Injectable so tests can use a short budget
+   * instead of waiting the real 60s.
+   */
+  handshakeTimeoutMs?: number
 }
 
 interface PendingHandshake {
@@ -655,15 +661,16 @@ export function listenNoise(options: ListenerOptions): Promise<{
         return
       }
       track(socket)
-      // The 60s handshake budget starts at accept, not at dequeue: N idle
+      // The handshake budget starts at accept, not at dequeue: N idle
       // connections must not delay a legitimate peer by N x 60s (P0-5).
+      const handshakeBudgetMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS
       const deadline = new AbortController()
       const deadlineTimer = setTimeout(() => {
         deadline.abort(
-          new Error(`Noise handshake timed out after ${HANDSHAKE_TIMEOUT_MS / 1000}s: peer stopped responding`),
+          new Error(`Noise handshake timed out after ${handshakeBudgetMs / 1000}s: peer stopped responding`),
         )
         killSocket(socket)
-      }, HANDSHAKE_TIMEOUT_MS)
+      }, handshakeBudgetMs)
       pending.push({ socket, deadline, deadlineTimer })
       pump()
     })

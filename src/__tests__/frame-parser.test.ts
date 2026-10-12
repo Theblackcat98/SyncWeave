@@ -307,3 +307,61 @@ test("v2: per-type body caps reject oversized declarations on the header", async
   const under = await mk(4000).readHeader()
   expect(under.kind).toBe("header")
 })
+
+/** A source that stalls forever, until its abort signal fires (P2-10). */
+class StallingSource implements ByteSource {
+  async read(_n: number, signal?: AbortSignal): Promise<Uint8Array | null> {
+    if (signal?.aborted) throw signal.reason
+    await new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true })
+    })
+    throw new Error("unreachable")
+  }
+}
+
+test("P2-10: header arrives but body never completes → body timeout fires with the phase-specific message", async () => {
+  const parser = new FrameParser(new StallingSource(), {
+    maxBodyLength: 64 * 1024,
+    bodyTimeoutMs: 300,
+  })
+  parser.transitionTo("receiving")
+  const header: FrameHeader = {
+    type: FrameType.FileChunk,
+    bodyLength: 100,
+    extension: new Map(),
+    headerBytes: 8,
+  }
+  const err = await parser.readBody(header).then(
+    () => null,
+    (e: unknown) => e,
+  )
+  expect(err).toBeInstanceOf(Error)
+  // Phase-specific: names the body phase and the cause, not bare "aborted".
+  expect((err as Error).message).toMatch(/frame body timed out after 0\.3s: sender stalled mid-frame/)
+})
+
+test("P2-10: a source that yields body bytes before stalling still hits the timeout", async () => {
+  // First read yields 10 of 100 bytes, then stalls: the timeout bounds the
+  // *whole* body read, not just the first byte.
+  let calls = 0
+  const dribble: ByteSource = {
+    async read(n: number, signal?: AbortSignal): Promise<Uint8Array | null> {
+      calls++
+      if (calls === 1) return new Uint8Array(10)
+      if (signal?.aborted) throw signal.reason
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true })
+      })
+      throw new Error("unreachable")
+    },
+  }
+  const parser = new FrameParser(dribble, { maxBodyLength: 64 * 1024, bodyTimeoutMs: 300 })
+  parser.transitionTo("receiving")
+  const header: FrameHeader = {
+    type: FrameType.FileChunk,
+    bodyLength: 100,
+    extension: new Map(),
+    headerBytes: 8,
+  }
+  await expect(parser.readBody(header)).rejects.toThrow(/frame body timed out/)
+})
