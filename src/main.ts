@@ -8,6 +8,7 @@ import { parseArgs } from "./cli-args.js"
 import { logEvent } from "./services/diagnostic-log.js"
 import type { FileSystemService } from "./services/ports.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
+import { loadDestinations } from "./services/destinations.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "./services/mock-transfer-service.js"
 import { NullPeerService, NullTransferService } from "./services/null-services.js"
@@ -171,7 +172,9 @@ if (!realMode) {
     filesystem: null as unknown as FileSystemService,
     peerService: new NullPeerService(),
     transferService: new NullTransferService(),
-    receiveDestinations: [receiveDirectory] as unknown as readonly [string, ...string[]],
+    // Persisted across restarts via destinations.json; ~/Downloads is
+    // always the default (first) entry.
+    receiveDestinations: loadDestinations(receiveDirectory),
     mode: "real",
     real,
   })

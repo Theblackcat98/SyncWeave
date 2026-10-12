@@ -985,7 +985,12 @@ export interface ReceiveOptions {
    * exactly.
    */
   expectedPeerId?: string
-  destinationDirectory: string
+  /**
+   * Where to write received files. May be a function so the TUI can let the
+   * user pick the destination on the consent screen (issue #27) — it is
+   * resolved per file, after acceptance.
+   */
+  destinationDirectory: string | (() => string)
   /**
    * Called with the verified request; returns the exact subset to accept.
    * The SAS is provided so the consent screen can show it (P0-1). An empty
@@ -1021,7 +1026,10 @@ export interface ReceiveResult {
 
 /** Receiver side: verify, Gate B, present request, Gate C, receive, acknowledge. */
 export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResult> {
-  const { channel, handshakeHash, destinationDirectory, onTransferRequest, signal } = options
+  const { channel, handshakeHash, onTransferRequest, signal } = options
+  // Resolved per file, after acceptance — the consent screen may change it.
+  const destDir = () =>
+    typeof options.destinationDirectory === "function" ? options.destinationDirectory() : options.destinationDirectory
   const identity = options.identity ?? generateEphemeralIdentity()
   claimIdentity(identity)
   const sessions = new SessionManager()
@@ -1218,7 +1226,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
         throw new Error("file header: missing file id")
       }
       const fileId: Uint8Array = fileIdExt
-      const destinationName = await resolveDestination(destinationDirectory, file.name)
+      const destinationName = await resolveDestination(destDir(), file.name)
 
       let sawFileEnd = false
       async function* chunks(): AsyncGenerator<Uint8Array> {
@@ -1249,7 +1257,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
 
       try {
         const result = await receiveToFile(chunks(), {
-          destinationDirectory,
+          destinationDirectory: destDir(),
           peerFileName: destinationName,
           maxBytes: BUDGET_MAX_FILE_BYTES,
           maxNameBytes: APP_MAX_NAME_BYTES,

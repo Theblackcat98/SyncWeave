@@ -21,7 +21,7 @@ export interface RenderData {
   mode: AppMode
   filesystem: FileSystemService
   peerService: PeerService
-  receiveDestinations: readonly [string, ...string[]]
+  receiveDestinations: readonly string[]
   peers: MockPeer[]
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
@@ -381,7 +381,9 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
     card.add(label(renderer, "consent-sas", `Security code: ${request.sas} · confirm with the sender before accepting`, theme.color.warning))
   }
   card.add(label(renderer, "consent-count", `${request.files.length} proposed  ·  ${request.files.filter((file) => file.accepted).length} selected  ·  ${totalBytes(request.files.filter((file) => file.accepted))}`, theme.color.white))
-  card.add(label(renderer, "consent-destination", `Destination: ${data.receiveDestinations[state.receiveDestinationIndex % data.receiveDestinations.length]}  [D] change`, theme.color.muted))
+  const destIndex = state.receiveDestinationIndex % Math.max(1, data.receiveDestinations.length)
+  const destActive = data.receiveDestinations[destIndex] ?? ""
+  card.add(label(renderer, "consent-destination", `Destination: ${destActive} (${destIndex + 1}/${data.receiveDestinations.length})  [D] cycle · [+] add · [-] remove`, theme.color.muted))
   card.add(label(renderer, "consent-scope", "Review every item. Nothing streams until you accept this transfer.", theme.color.warning))
   const list = panel(renderer, "consent-file-list", { flexDirection: "column", flexGrow: 1, minHeight: 1, marginTop: 1 })
   // Scrollable window: the list can hold 25 files but only ~10 rows fit.
@@ -399,12 +401,13 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
   const focused = request.files[state.selectedConsentFile]
   card.add(actionRow(renderer, "consent-file-options", [
     actionButton(renderer, "toggle-selected", `${focused?.accepted ? "Skip" : "Include"} file · Space`, "toggle-consent", actions.command, { fg: theme.color.warning }),
-    // Rename and Destination are mock-era controls with no real effect;
-    // hide them in real mode.
+    // Rename is a mock-era control with no real effect; hide it in real mode.
+    // Destination is real in both modes (issue #27): files land in the
+    // selected destination.
     ...(request.mode === "incoming" ? [] : [
       actionButton(renderer, "rename-selected", `${focused?.renamed ? "Undo rename" : "Rename"} · R`, "rename-consent", actions.command, { fg: theme.color.remote }),
-      actionButton(renderer, "destination-select", "Destination · D", "cycle-destination", actions.command, { fg: theme.color.muted }),
     ]),
+    actionButton(renderer, "destination-select", "Destination · D", "cycle-destination", actions.command, { fg: theme.color.muted }),
   ], width < theme.layout.veryNarrowWidth))
   card.add(label(renderer, "consent-separation", "Per-transfer choice only · Favorites and manual fingerprint comparison do not grant consent.", theme.color.dim))
   card.add(actionRow(renderer, "consent-actions", [
@@ -559,6 +562,7 @@ function renderHelp(parent: BoxRenderable, data: RenderData, width: number): voi
     ["i", mode === "real" ? "Incoming transfers arrive from the network" : "Create a mock incoming request"],
     ["q / v / p", mode === "real" ? "Peer list is in the Receiver pane" : "Peer preview / manual fingerprint comparison / Favorites"],
     ["d / t / ?", "Diff / transfer queue / help"],
+    ["D / + / - (consent)", "Cycle / add / remove the receive destination"],
     ["Mouse", "Click rows and actions; scroll panes to browse"],
     ["Narrow screens", "Use Local / Remote tabs and the Stage, Send, and Receive toolbar actions"],
     ["Esc / Ctrl+C", "Back or cancel / quit"],

@@ -20,6 +20,7 @@ export function createInitialAppState(paths: Record<Pane, string>, reducedMotion
     selectedConsentFile: 0,
     consentScrollOffset: 0,
     receiveDestinationIndex: 0,
+    destinationInput: null,
     transferQueue: [],
     activeTransferId: null,
     reducedMotion,
