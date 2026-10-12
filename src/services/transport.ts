@@ -535,6 +535,16 @@ export interface HandshakeResult {
   remoteStatic: Uint8Array
   /** The Noise handshake hash, bound to this exact session. */
   handshakeHash: Uint8Array
+  /**
+   * The peer's IP address as seen on the socket (IPv4-mapped IPv6 addresses
+   * are unmapped). Unauthenticated: use only to label a claimed alias.
+   */
+  remoteAddress: string | null
+}
+
+function unmapAddress(address: string | undefined): string | null {
+  if (!address) return null
+  return address.startsWith("::ffff:") && address.includes(".") ? address.slice(7) : address
 }
 
 async function runHandshake(
@@ -591,6 +601,7 @@ async function runHandshake(
     channel: new NoiseChannel(socket, send, receive, reader),
     remoteStatic,
     handshakeHash: handshake.handshakeHash,
+    remoteAddress: unmapAddress(socket.remoteAddress),
   }
   } finally {
     clearTimeout(budgetTimer)

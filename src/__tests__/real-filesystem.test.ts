@@ -7,6 +7,7 @@ import { createSyncWeaveApp, type SyncWeaveApp } from "../app.js"
 import { expandHome, MAX_DIRECTORY_ENTRIES, RealFileSystemService } from "../services/real-filesystem.js"
 import { MockPeerService } from "../services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "../services/mock-transfer-service.js"
+import { fakeRealTransport } from "./ui-harness.js"
 
 process.env.SYNCWEAVE_REDUCED_MOTION = "1"
 
@@ -148,6 +149,8 @@ test("real mode shows real local files and a receiver status panel instead of re
     transferService: new MockTransferService(),
     receiveDestinations: mockDestinations,
     mode: "real",
+    // P1-8: real mode refuses to start without its transport bundle.
+    real: fakeRealTransport(),
   })
   open.push({ setup, app })
   await setup.flush()

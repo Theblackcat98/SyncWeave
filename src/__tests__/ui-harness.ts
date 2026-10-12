@@ -22,7 +22,7 @@ export function fakeRealTransport(peers: Array<{ peerId: string; alias: string; 
   return {
     identity: generateEphemeralIdentity(),
     listener: { accept: async function* () { await never; yield* [] }, close: async () => {} },
-    discovery: { listPeers: () => peers.map((peer) => ({ ...peer, lastSeen: Date.now() })), stop: () => {} },
+    discovery: { start: async () => {}, listPeers: () => peers.map((peer) => ({ ...peer, lastSeen: Date.now() })), stop: () => {} },
     alias: "ui-test",
     tcpPort: 24816,
     receiveDirectory: "/tmp",

@@ -1,18 +1,18 @@
 #!/usr/bin/env bun
 import { createCliRenderer } from "@opentui/core"
-import { mkdirSync } from "node:fs"
+import { accessSync, constants, mkdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { createSyncWeaveApp, type RealTransport } from "./app.js"
-import { parseArgs } from "./cli-args.js"
+import { parseArgs, UsageError } from "./cli-args.js"
 import { logEvent } from "./services/diagnostic-log.js"
-import type { FileSystemService } from "./services/ports.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
-import { loadDestinations } from "./services/destinations.js"
-import { sweepOrphanPartials } from "./services/safe-receive-sink.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "./services/mock-transfer-service.js"
 import { NullPeerService, NullTransferService } from "./services/null-services.js"
+import { RealFileSystemService, expandHome } from "./services/real-filesystem.js"
+import { loadDestinations } from "./services/destinations.js"
+import { sweepOrphanPartials } from "./services/safe-receive-sink.js"
 import { generateEphemeralIdentity } from "./services/peer-id.js"
 import { listenNoise } from "./services/transport.js"
 import { DiscoveryService } from "./services/discovery.js"
@@ -21,9 +21,9 @@ import pkg from "../package.json" with { type: "json" }
 const args = process.argv.slice(2)
 
 /** Startup errors must bypass OpenTUI's console capture: write to stderr directly. */
-function fatal(message: string): never {
+function fatal(message: string, exitCode = 1): never {
   process.stderr.write(`syncweave: ${message}\n`)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
 // Last-resort handlers: restore the terminal and exit nonzero instead of
@@ -41,10 +41,8 @@ let cli: ReturnType<typeof parseArgs>
 try {
   cli = parseArgs(args, process.env)
 } catch (error) {
-  fatal(error instanceof Error ? error.message : String(error))
-}
-for (const warning of cli.warnings) {
-  process.stderr.write(`syncweave: ${warning}\n`)
+  if (error instanceof UsageError) fatal(`${error.message}`, error.exitCode)
+  fatal(error instanceof Error ? error.message : String(error), 2)
 }
 
 if (cli.showHelp) {
@@ -58,14 +56,20 @@ Modes:
   --real      Real mode: live Noise-encrypted transfers over TCP, UDP-multicast
               peer discovery, real local files. Received files land in ~/Downloads.
 
-Flags:
-  --alias NAME        Display name announced to peers (default: $USER).
+Flags (each takes --flag VALUE or --flag=VALUE):
+  --alias NAME        Display name announced to peers (default: syncweave-XXXX,
+                      random per run).
   --port N            TCP port for the Noise listener (default: 24816).
-  --bind ADDR         Local address to bind (default: :: dual-stack IPv4/IPv6).
-  --peer HOST:PORT    Manual peer, repeatable. Fallback when multicast
-                      discovery is unavailable. IPv6 as --peer [::1]:24816.
+  --bind ADDR         Local address to bind. Default: :: (IPv6, falling back to
+                      0.0.0.0 when IPv6 is unavailable). An explicit --bind never falls back.
+  --peer HOST:PORT    Manual peer, repeatable, IP address only. Fallback when
+                      multicast discovery is unavailable. IPv6: --peer [::1]:24816.
+  --root DIR          Start the Local pane in DIR (real mode; default: your home folder).
+  --real=0|1          Force real mode off or on.
   --help, -h          Show this help and exit.
   --version           Show the version and exit.
+
+Exit codes: 0 success, 1 startup failure, 2 usage error.
 
 Two instances on one machine need distinct ports:
   bun src/main.ts --real --alias a --port 24816 --peer 127.0.0.1:24818
@@ -79,7 +83,7 @@ if (cli.showVersion) {
   process.exit(0)
 }
 
-const { realMode, alias, tcpPort, bindAddr, manualPeers } = cli
+const { realMode, alias, tcpPort, manualPeers } = cli
 
 if (!realMode) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
@@ -89,13 +93,44 @@ if (!realMode) {
     transferService: new MockTransferService(),
     receiveDestinations: mockDestinations,
   })
-  renderer.on("destroy", app.dispose)
+  renderer.on("destroy", () => {
+    void app.dispose()
+  })
   renderer.start()
 } else {
-  // Real mode: set up networking BEFORE the renderer starts, so startup
+  // The receive sink requires an existing, writable directory. Create it and
+  // fail fast with a clear message instead of a cryptic ENOENT mid-transfer.
+  const receiveDirectory = join(homedir(), "Downloads")
+  try {
+    mkdirSync(receiveDirectory, { recursive: true, mode: 0o700 })
+    accessSync(receiveDirectory, constants.W_OK)
+  } catch (error) {
+    fatal(
+      `receive directory ${receiveDirectory} is not usable (${error instanceof Error ? error.message : String(error)}). ` +
+      "Fix its ownership or permissions, then start again.",
+    )
+  }
+  let rootDirectory = homedir()
+  if (cli.rootDir !== null) {
+    rootDirectory = resolve(expandHome(cli.rootDir))
+    try {
+      if (!statSync(rootDirectory).isDirectory()) throw new Error("not a directory")
+    } catch (error) {
+      fatal(`--root ${cli.rootDir} is not a readable directory (${error instanceof Error ? error.message : String(error)}).`)
+    }
+  }
+  // Sweep orphaned staging temp files from killed sessions (kill -9,
+  // SIGTERM before handlers ran, crashes). They are never user data.
+  {
+    const swept = await sweepOrphanPartials(receiveDirectory)
+    if (swept > 0) logEvent("startup-sweep", `removed ${swept} orphaned partial file(s)`)
+  }
+
+  // Real mode: the listener is bound BEFORE the renderer starts, so startup
   // errors are visible (OpenTUI captures console output once running).
-  const identity = generateEphemeralIdentity()
   const aborter = new AbortController()
+  let bindAddr = cli.bindAddr
+  let startupNotice: string | null = null
   let listener: Awaited<ReturnType<typeof listenNoise>>
   try {
     listener = await listenNoise({ host: bindAddr, port: tcpPort, signal: aborter.signal })
@@ -108,16 +143,22 @@ if (!realMode) {
         `and point the two at each other with --peer 127.0.0.1:<port>.`,
       )
     }
-    fatal(`could not start the TCP listener: ${message}`)
+    // D4: the default bind tries IPv6 first. Hosts without IPv6 fall back to
+    // IPv4 with a visible notice. An explicit --bind never falls back.
+    if (cli.bindExplicit || bindAddr !== "::" || message.includes("EACCES")) {
+      fatal(`could not start the TCP listener on ${bindAddr}:${tcpPort}: ${message}`)
+    }
+    try {
+      listener = await listenNoise({ host: "0.0.0.0", port: tcpPort, signal: aborter.signal })
+    } catch (fallbackError) {
+      fatal(`could not start the TCP listener on :: or 0.0.0.0, port ${tcpPort}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`)
+    }
+    bindAddr = "0.0.0.0"
+    startupNotice = "IPv6 is not available here: listening on 0.0.0.0 (IPv4 only)."
+    logEvent("bind-fallback", `:: failed (${message}); using 0.0.0.0`)
   }
+
   const discovery = new DiscoveryService()
-  let discoveryError: string | null = null
-  try {
-    await discovery.start({ alias, peerId: identity.peerId, tcpPort })
-  } catch (error) {
-    // Non-fatal: manual --peer entries still work. Surfaced in-TUI below.
-    discoveryError = error instanceof Error ? error.message : String(error)
-  }
   // Seed manual peers into the discovery list so they appear immediately.
   for (const mp of manualPeers) {
     discovery.addManualPeer({
@@ -128,41 +169,27 @@ if (!realMode) {
       lastSeen: Date.now(),
     })
   }
-  // The receive sink requires an existing directory; create it now and fail
-  // fast with a clear message instead of a cryptic ENOENT mid-transfer.
-  const receiveDirectory = join(homedir(), "Downloads")
-  try {
-    mkdirSync(receiveDirectory, { recursive: true, mode: 0o700 })
-  } catch (error) {
-    fatal(`could not create receive directory ${receiveDirectory}: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  // Sweep orphaned staging temp files from killed sessions (kill -9,
-  // SIGTERM before handlers ran, crashes). They are never user data.
-  {
-    const swept = await sweepOrphanPartials(receiveDirectory)
-    if (swept > 0) logEvent("startup-sweep", `removed ${swept} orphaned partial file(s)`)
-  }
 
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
   logEvent("session-start", `real mode alias=${alias} port=${tcpPort} bind=${bindAddr}`)
   const real: RealTransport = {
-    identity,
+    // Discovery display/dedup hint only. Keys are discarded: no identity is
+    // kept across the run, and verification happens per session (D1).
+    announcedPeerId: generateEphemeralIdentity().peerId,
     listener,
     discovery,
     alias,
     tcpPort,
     receiveDirectory,
     aborter,
-    startupWarning: discoveryError ? `Discovery failed to start (${discoveryError}); manual --peer entries still work.` : null,
+    startupWarning: startupNotice,
     bindAddr,
   }
   const app = createSyncWeaveApp(renderer, {
+    filesystem: new RealFileSystemService(rootDirectory),
     // Real mode gets null services: the mock peer/transfer services simulate
-    // network behavior and must not exist in real mode. The filesystem is
-    // replaced by RealFileSystemService inside createSyncWeaveApp, so no
-    // mock filesystem is constructed either. Real transfers feed
-    // state.transferQueue directly.
-    filesystem: null as unknown as FileSystemService,
+    // network behavior and must not exist in real mode. Real transfers feed
+    // the app's transfer queue directly.
     peerService: new NullPeerService(),
     transferService: new NullTransferService(),
     // Persisted across restarts via destinations.json; ~/Downloads is
@@ -171,29 +198,31 @@ if (!realMode) {
     mode: "real",
     real,
   })
-  const dispose = () => {
+  // One shutdown path for Ctrl+C, SIGINT/SIGTERM/SIGHUP and renderer teardown:
+  // stop listening, let in-flight sends and receives settle (bounded by the
+  // app), then exit explicitly.
+  let shuttingDown = false
+  const shutdown = (): void => {
+    if (shuttingDown) return
+    shuttingDown = true
     logEvent("session-stop")
     try {
       discovery.stop()
     } catch { /* best effort */ }
     aborter.abort()
     void listener.close().catch(() => { /* best effort */ })
-    app.dispose()
+    void app.dispose().finally(() => {
+      try {
+        renderer.destroy()
+      } catch { /* already torn down */ }
+      process.exit(0)
+    })
   }
   // SIGTERM/SIGHUP (kill, terminal close, SSH drop) must clean up like
   // Ctrl+C does, otherwise the terminal is left in raw mode.
-  const onSignal = () => {
-    dispose()
-    renderer.destroy()
-  }
-  process.on("SIGTERM", onSignal)
-  process.on("SIGHUP", onSignal)
-  process.on("SIGINT", onSignal)
-  renderer.on("destroy", () => {
-    process.off("SIGTERM", onSignal)
-    process.off("SIGHUP", onSignal)
-    process.off("SIGINT", onSignal)
-    dispose()
-  })
+  process.on("SIGTERM", shutdown)
+  process.on("SIGHUP", shutdown)
+  process.on("SIGINT", shutdown)
+  renderer.on("destroy", shutdown)
   renderer.start()
 }
