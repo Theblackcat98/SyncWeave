@@ -822,8 +822,10 @@ async function checkSendSources(
 
 /**
  * Open once, fstat, hash through the same fd. O_NONBLOCK means a FIFO that
- * replaced the file after the stat cannot block the open (P0-11); fstat then
- * refuses anything that is not a regular file.
+ * replaced the file after the stat cannot block the open (P0-11); O_NOFOLLOW
+ * means a symlink swapped in after the stat is refused with ELOOP (P5)
+ * instead of silently sending the target's bytes; fstat then refuses
+ * anything that is not a regular file.
  */
 async function snapshotFile(
   source: { path: string; name: string },
@@ -832,7 +834,21 @@ async function snapshotFile(
   signal?: AbortSignal,
   onHashProgress?: (fileIndex: number, fileCount: number, fileName: string) => void,
 ): Promise<FileSnapshot> {
-  const handle = await fs.open(source.path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+  let handle: fs.FileHandle
+  try {
+    handle = await fs.open(
+      source.path,
+      fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW,
+    )
+  } catch (error) {
+    // P5: the path is a symlink (possibly swapped in after the pre-send
+    // stat). Fail closed: exclude the file with a clear message; never
+    // follow the link to the target's bytes.
+    if ((error as { code?: unknown } | null)?.code === "ELOOP") {
+      throw new Error(`cannot send ${source.name}: it is a symbolic link`)
+    }
+    throw error
+  }
   try {
     const st = await handle.stat()
     if (!st.isFile()) {
