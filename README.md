@@ -1,32 +1,62 @@
 # SyncWeave
 
-A keyboard-first, animated terminal UI for reviewing and staging file transfers — a TUI take on LocalSend for the local network. The app runs in two modes: **mock** (the original deterministic simulation: no real files, no network) and **real** (actual transfers). The real mode implements the Phase 2 network stack: `Noise_XX_25519_AESGCM_SHA256` over TCP (verified against the official Noise test vector), UDP-multicast peer discovery with manual `IP:port` fallback, session-ephemeral Ed25519 Peer IDs verified before any metadata flows, per-transfer receiver consent, 64 KiB chunked streaming, SHA-256 integrity, automatic rename on collision, and restart-from-zero recovery. See [docs/decisions.md](docs/decisions.md) for the recorded decisions and [phase2.md](phase2.md) for the specification.
+A keyboard-first terminal UI for staging and sending files on a local network: a TUI take on LocalSend.
 
-## Run
+SyncWeave runs in two modes:
 
-Requires [Bun](https://bun.sh/) and a Unicode-capable terminal. In a checkout:
+- **Mock** (default): the original deterministic simulation. No real files are read or sent and no network is used.
+- **Real** (`--real`): sends files between SyncWeave instances over TCP, encrypted with `Noise_XX_25519_AESGCM_SHA256`. Peers are found by UDP multicast or added by hand with `--peer host:port`.
+
+Design and wire protocol: [docs/networking.md](docs/networking.md) and [docs/decisions.md](docs/decisions.md). Threat model and reporting: [SECURITY.md](SECURITY.md). Privacy: [docs/privacy.md](docs/privacy.md).
+
+## Status
+
+SyncWeave is **0.1.0, pre-release, and not production-ready.** No tagged release exists yet.
+
+**Implemented and covered by automated tests** (Linux, in-process loopback):
+
+- Noise XX handshake, checked against the official `Noise_XX_25519_AESGCM_SHA256` test vectors, and protocol v2 framing.
+- Send, accept, decline, cancel and receiver failure over real TCP sockets.
+- Per-file acknowledgement: the sender reports success only when the receiver acknowledges each file with a matching hash and size.
+- Receiver consent for every transfer, with a security code shown on both ends.
+- Collision handling: a second file with the same name is saved as `name (1).ext`. Existing files are never overwritten.
+- Partial files are created exclusively with mode `0600` and are removed on failure.
+- Friendly message when the TCP port is already in use.
+
+**Unverified:**
+
+- Two physical hosts on a real LAN. The [real-mode checklist](docs/real-mode-checklist.md) has not been run on hardware.
+- Multicast discovery across real routers and access points.
+- macOS. CI has a macOS job, but it has not run yet.
+- Termux and Android.
+- Throughput, memory and CPU under load.
+
+**Known limitations** (full list in [docs/known-limitations.md](docs/known-limitations.md)):
+
+- No retries and no resume. A failed or cancelled transfer must be sent again from the beginning.
+- Discovery names are unauthenticated. Anyone on the LAN can claim any name, so compare the security code.
+- Sender concurrency is not capped.
+
+## Requirements and install
+
+- [Bun](https://bun.sh/) **1.4.3**, the version in [`.bun-version`](.bun-version) and used by CI. The package declares `engines.bun >=1.4.0`.
+- A Unicode-capable terminal. For terminals without Nerd Fonts, set `SYNCWEAVE_ASCII=1`.
 
 ```sh
+git clone https://github.com/Theblackcat98/SyncWeave.git
+cd SyncWeave
 bun install
-bun run dev
+bun run dev        # run from source, reloads on change
+bun run start      # run from source
 ```
 
-For terminals without Nerd Fonts, use the built-in ASCII icon fallback:
+Release binaries for `linux-x64`, `linux-arm64` and `darwin-arm64` are built by the release workflow when a `v*` tag is pushed. No tag has been published yet, so build from source for now.
 
-```sh
-SYNCWEAVE_ASCII=1 bun run start
-```
-
-Reduce decorative motion while keeping transfer simulation usable:
-
-```sh
-SYNCWEAVE_REDUCED_MOTION=1 bun run start
-```
+Reduced motion for the decorative animation: `SYNCWEAVE_REDUCED_MOTION=1`.
 
 ## Real mode
 
-Real transfers run with `--real`. Two machines on the same LAN discover each
-other automatically over UDP multicast:
+Run with `--real`. Two machines on the same LAN find each other by multicast:
 
 ```sh
 # machine A
@@ -35,66 +65,101 @@ bun src/main.ts --real --alias laptop1
 bun src/main.ts --real --alias laptop2
 ```
 
-Flags:
+Flags accept both `--flag value` and `--flag=value`. Environment variable `SYNCWEAVE_MODE=real` is the same as `--real`.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--real` | off | Real mode: live identity, TCP listener, discovery, real filesystem. |
-| `--alias <name>` | `$USER` | Display name announced to peers. |
-| `--port <n>` | 24816 | TCP port for the Noise listener. |
-| `--bind <addr>` | `::` | Local address to bind (dual-stack IPv4/IPv6). Use `127.0.0.1` to stay off the LAN. |
-| `--peer <host:port>` | — | Manual peer (repeatable). Fallback when multicast discovery is unavailable; IPv6 as `--peer [::1]:24816`. |
-| `--help, -h` | — | Show help and exit. |
-| `--version` | — | Show version and exit. |
+| `--real` | off | Real mode: TCP listener, discovery and the real filesystem. |
+| `--alias <name>` | random label, new each run | Name shown to peers. It is not your username. It is visible to everyone on the LAN. |
+| `--port <n>` | `24816` | TCP port for the listener, 1 to 65535. |
+| `--bind <addr>` | `::` | Address to listen on. Without `--bind`, SyncWeave falls back to `0.0.0.0` if IPv6 is unavailable and shows a notice. An explicit `--bind` never falls back. Use `127.0.0.1` to stay off the LAN. |
+| `--peer <host[:port]>` | none | Manual peer, repeatable. Port defaults to `24816`. Wrap IPv6 in brackets: `--peer [::1]:24816`. |
+| `--root <dir>` | your home directory | Directory the local file browser opens in. |
+| `-h`, `--help` | | Print usage and exit 0. |
+| `--version` | | Print the version and exit 0. |
 
-Two instances on the **same machine** need distinct ports, pointed at each
-other:
+Unknown flags, a missing value, or an invalid port or `--peer` value print a message and exit with status 2. Runtime failures exit with status 1.
+
+### Two instances on one machine
+
+Each instance needs its own port and must point at the other, because multicast may not loop back on one host:
 
 ```sh
 bun src/main.ts --real --alias laptop1 --port 24816 --peer 127.0.0.1:24818
 bun src/main.ts --real --alias laptop2 --port 24818 --peer 127.0.0.1:24816
 ```
 
-Workflow: browse your real files, `Space` to stage, `Tab` to the Receiver
-pane, `↑/↓` to pick a peer, `Tab` back, `s` then `Enter` to send. The
-receiver gets a consent screen showing a **security code** — confirm it with
-the sender out of band (in person, over a call) before accepting, because
-discovery aliases are unauthenticated and can be spoofed. Keyboard `a`
-accepts all, `Enter` accepts the selection, `x` declines. Accepted files
-land in `~/Downloads` with automatic rename on collision. The sender only
-reports success after the receiver acknowledges each file. Network details,
-firewall notes, and what is still unverified live in
-[docs/networking.md](docs/networking.md).
+### Sending
 
-## Workflow
+1. Browse your files. Press `Space` to stage a file.
+2. Press `Tab` to the Receiver pane and use `↑`/`↓` to pick a peer. Press `Tab` to go back.
+3. Press `s`, then `Enter`.
+4. Both people compare the **security code**. The sender confirms it before any file names or sizes are sent. The receiver confirms it on the consent screen.
 
-(mock mode)
+### Receiving
 
-- Browse either mock workspace with **↑/↓**; use **Tab**, **1**, or **2** to change panes. Press **Enter** on a directory to open it and **Backspace** to go up. The **Stage** toolbar action works with a mouse or touch terminal as well as **Space**.
-- Press **Space** to stage a file, **a** to stage all files in the active folder, or **Shift+A** to clear that folder's staging. Use **d** to inspect the mock diff.
-- Press **s** to review outgoing items. Continue to a clearly labeled mock receiver-consent step; accept all, include/skip individual files, rename an item, choose a destination, or decline. Progress only starts after an explicit acceptance choice.
-- Press **i** to simulate an incoming request and apply the same per-transfer consent choices. Press **e** during progress to simulate a failure; use **r** to retry. **Esc** cancels an active mock transfer.
-- Press **q** to browse mock peers, **e** to simulate a discovery timeout, **r** to retry the mock preview, **v** to display a fingerprint for manual comparison, **f** to save/remove a local Favorite, **p** to view Favorites, **t** for this-session transfer history, or **?** for help. Mouse clicks and wheel scrolling are supported where the terminal reports mouse input.
+The consent screen shows the sender's name, the file names, the sizes and the security code. Choose a destination, then:
 
-A fingerprint comparison is not stored as verification. A Favorite is a local destination shortcut, not pairing, trust, or permission to auto-accept. Every transfer request requires its own consent decision. Decorative identity art is not a scannable code or protocol invitation.
+- `a` accepts all files.
+- `Enter` accepts the selected files.
+- `x` declines.
+
+You have **60 seconds** to answer. The sender waits up to **75 seconds** for acceptance. Accepted files are saved to the destination, which defaults to `~/Downloads`. The destination picker refuses symlinks, system directories, hidden (dot) directories and world-writable directories.
+
+**Security code and identity.** A sender's name shown on a discovery list is a claim, not proof of identity. Compare the security code with the other person in person or over a call before you accept anything sensitive. There is no pairing and no trust-on-first-use: every transfer needs its own comparison. Peer IDs are random per process and are never stored.
+
+**Startup cleanup.** At startup SyncWeave removes leftover `.syncweave-*.partial` files only when the process that created them is no longer running. Partials from a second instance that is still running are left alone.
+
+## Mock mode
+
+Mock mode runs the simulated workflow. No files are read or sent.
+
+- Browse with `↑`/`↓`. Use `Tab`, `1` or `2` to change panes. `Enter` opens a folder and `Backspace` goes up.
+- `Space` stages a file. `a` stages all files in the folder. `Shift+A` clears staging for the folder.
+- `s` reviews outgoing items. Each simulated receive asks for consent. `i` simulates an incoming request.
+- `e` simulates a failure during progress. `r` retries. `Esc` cancels.
+- `q` lists mock peers. `v` shows a fingerprint for comparison, which is not stored as verification. `f` saves a local Favorite, which is a destination shortcut and not trust. `t` shows session history. `?` shows help.
+
+Mouse clicks and wheel scrolling work where the terminal reports mouse input.
 
 ## Project layout
 
-- `src/domain.ts` — typed state and transfer contracts
-- `src/state/` — application state modules
-- `src/services/` — isolated mock filesystem, peer-discovery, and transfer services
-- `src/ui/` — OpenTUI theme primitives and responsive views
-- `src/ui/animation-clock.ts` — active-only animation ticks with pause/resume/disposal
-- `src/app.ts` — keyboard/mouse event routing and mock workflow state machine
-- `phase1.md` — Phase 1 scope, reference findings, checklist, and reconciliation status
-- `phase2.md` — proposed direct-LAN transfer acceptance criteria, Phase 1 TODO crosswalk, and issue dispositions
+- `src/main.ts`: entry point. Parses flags, starts real or mock services, and handles signals.
+- `src/cli-args.ts`: flag parsing and validation.
+- `src/app.ts`: keyboard and mouse routing and the workflow state machines for mock and real modes.
+- `src/domain.ts`, `src/state/`: typed state and transfer contracts.
+- `src/peer-sync.ts`, `src/cursor.ts`, `src/theme.ts`: helpers for peers, cursors and colours.
+- `src/services/`: real and simulated services.
+  - Real: `transport.ts` (TCP listener and dialer), `noise.ts` (Noise XX), `frame-parser.ts` (framing and size caps), `transfer-protocol.ts` (send and receive protocol), `session-auth.ts` (identity proofs and SAS), `peer-id.ts`, `discovery.ts` (UDP multicast), `safe-receive-sink.ts` (writes received files), `real-filesystem.ts`, `destinations.ts` (destination picker), `ports.ts`, `friendly-errors.ts`, `diagnostic-log.ts`.
+  - Simulated and placeholder: `mock-filesystem.ts`, `mock-peer-service.ts`, `mock-transfer-service.ts`, `null-services.ts`.
+- `src/ui/`: OpenTUI rendering, primitives, transfer presentation and `animation-clock.ts`.
+- `docs/`: networking, decisions, checklists, privacy, troubleshooting, known limitations and release gates. Old phase documents are in `docs/history/`.
 
 ## Checks
 
 ```sh
-bun run typecheck
-bun test
-bun run smoke
+bun run lint        # Biome, lint only
+bun run typecheck   # tsc --noEmit
+bun test            # full suite
+bun run test:coverage   # runs coverage and enforces the floors in scripts/check-coverage.ts
+bun run smoke       # headless UI smoke test
+bun audit           # dependency vulnerability check
 ```
 
-The headless OpenTUI tests cover the wide and narrow layouts, keyboard navigation, mouse actions, consent-before-progress, successful completion, reduced-motion progress, failure/retry, peer timeout/retry, Favorites, and manual fingerprint comparison. Termux and real-device touch behavior still require testing on an Android terminal.
+CI runs lint, typecheck, coverage and `bun audit` on `ubuntu-latest` and `macos-latest`. The macOS job has not run yet. The headless UI tests cover the wide and narrow layouts, keyboard navigation, mouse actions, consent before progress, completion, reduced motion, failure and retry, peer timeout and retry, Favorites and fingerprint comparison. Termux and touch behaviour still need testing on a real Android terminal.
+
+## Documentation
+
+- [docs/networking.md](docs/networking.md): transports, protocol, security properties and firewall notes.
+- [docs/decisions.md](docs/decisions.md): recorded decisions and their status.
+- [docs/real-mode-checklist.md](docs/real-mode-checklist.md): manual test steps for real mode.
+- [docs/troubleshooting.md](docs/troubleshooting.md): common failures and what to check.
+- [docs/known-limitations.md](docs/known-limitations.md): what does not work yet.
+- [docs/privacy.md](docs/privacy.md): what is visible on the LAN and what is written to disk.
+- [docs/release-gates.md](docs/release-gates.md): release gates with evidence.
+- [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md).
+- [docs/history/](docs/history/): the Phase 1 and Phase 2 planning documents, archived. They are not current.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

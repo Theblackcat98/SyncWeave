@@ -1,8 +1,10 @@
 # SyncWeave — Phase 2: Direct Local-LAN Transfer
 
+> **HISTORICAL — archived 2026-10-12.** Snapshot of the Phase 2 acceptance specification as written on 2026-10-11. Its status lines describe that date, not the current code. The current behaviour is in [docs/networking.md](../networking.md) and [docs/decisions.md](../decisions.md).
+
 > **SUPERSEDED (2026-10-11):** This document's no-discovery profile (§ "Decisions required", network behavior rows, and acceptance gates requiring proof of *no* automatic-discovery traffic) was superseded by Nick's correction recorded in `docs/decisions.md` (2026-10-11 amendment): SyncWeave is a TUI LocalSend and **does** want automatic LAN discovery via UDP multicast, with manual `IP:port` as fallback. The implementation on `main` (PRs #21–#23) ships UDP-multicast discovery (port 24817, group 224.0.0.167) plus repeatable `--peer host:port`. This file is kept as historical record; do not implement from it.
 
-**Status:** Conditionally selected manual-direct/no-mDNS MVP profile and acceptance specification; this documentation-only PR contains no Phase 2 networking or filesystem implementation. The approval boundary is documentation and a separate scoped implementation PR only—not merging or releasing, and not a claim of product readiness. All existing security and shipping gates remain mandatory.
+**Status at the time of writing (2026-10-11; now stale):** Conditionally selected manual-direct/no-mDNS MVP profile and acceptance specification. The sentence that this documentation-only PR contains no Phase 2 networking or filesystem implementation was true of that PR only; the networking and filesystem code is now on `main`. The approval boundary is documentation and a separate scoped implementation PR only—not merging or releasing, and not a claim of product readiness. All existing security and shipping gates remain mandatory.
 
 **Baseline:** current `main` at `2f100a00873068192f46812b211856f5844983d7` (October 11, 2026).
 

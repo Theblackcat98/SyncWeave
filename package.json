@@ -1,1 +1,46 @@
-{"bin":{"syncweave":"./src/main.ts"},"dependencies":{"@opentui/core":"0.6.0"},"description":"TUI file transfer for the local network — Noise-encrypted, with UDP-multicast peer discovery.","devDependencies":{"@types/bun":"1.4.2","typescript":"5.8.3"},"engines":{"bun":">=1.4.0"},"license":"MIT","name":"syncweave","repository":{"type":"git","url":"https://github.com/Theblackcat98/SyncWeave.git"},"scripts":{"check":"bun run typecheck && bun test","dev":"bun --watch src/main.ts","smoke":"bun test src/__tests__/app-smoke.test.ts","start":"bun src/main.ts","test":"bun test","typecheck":"tsc --noEmit"},"type":"module","version":"0.1.0"}
+{
+  "bin": {
+    "syncweave": "./src/main.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "0.6.0"
+  },
+  "description": "TUI file transfer for the local network — Noise-encrypted, with UDP-multicast peer discovery.",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/bun": "1.4.3",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "files": [
+    "src",
+    "!src/**/__tests__/**",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "docs",
+    "!docs/remediation-*.md",
+    "!docs/history"
+  ],
+  "license": "MIT",
+  "name": "syncweave",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Theblackcat98/SyncWeave.git"
+  },
+  "scripts": {
+    "check": "bun run lint && bun run typecheck && bun test",
+    "dev": "bun --watch src/main.ts",
+    "lint": "biome lint .",
+    "smoke": "bun test src/__tests__/app-smoke.test.ts",
+    "start": "bun src/main.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage && bun scripts/check-coverage.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}

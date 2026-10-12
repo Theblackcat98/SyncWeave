@@ -1,0 +1,31 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "files": {
+    "includes": ["**", "!**/node_modules", "!**/coverage", "!**/dist", "!**/bun.lock"]
+  },
+  "formatter": {
+    "enabled": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        "noNonNullAssertion": "off",
+        "useImportType": "off",
+        "useTemplate": "off"
+      },
+      "complexity": {
+        "useLiteralKeys": "off",
+        "useOptionalChain": "off"
+      },
+      "suspicious": {
+        "noControlCharactersInRegex": "off",
+        "useIterableCallbackReturn": "off"
+      },
+      "correctness": {
+        "noUnsafeFinally": "off"
+      }
+    }
+  }
+}

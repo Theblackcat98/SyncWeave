@@ -1,0 +1,5 @@
+# `bun test --coverage` writes coverage/lcov.info, which scripts/check-coverage.ts
+# reads to enforce the coverage floors (P1-49). The floors are not set here
+# because Bun's coverageThreshold applies to each file separately.
+[test]
+coverageReporter = ["text", "lcov"]

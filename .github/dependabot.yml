@@ -4,13 +4,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    # Only one runtime dependency (@opentui/core); keep it current.
+    # Covers @opentui/core (pre-1.0; see docs/decisions.md section 6) and the dev tools.
     commit-message:
       prefix: "chore"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    # Keeps the SHA pins in .github/workflows/ci.yml current (P2-11).
+    # Keeps the SHA pins in .github/workflows/ci.yml current (P2-24).
     commit-message:
       prefix: "chore"
