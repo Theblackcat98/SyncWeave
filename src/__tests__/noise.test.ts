@@ -1,12 +1,8 @@
 import { expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import {
-  NoiseHandshake,
-  NOISE_PROTOCOL_NAME,
-  x25519FromPrivate,
-  x25519ScalarMult,
-} from "../services/noise.js"
+import { NoiseHandshake, NOISE_PROTOCOL_NAME } from "../services/noise.js"
+import { x25519FromPrivate, x25519ScalarMult } from "./helpers/x25519.js"
 
 test("X25519 ladder agrees with node:crypto DH and derives stable public keys", () => {
   // Directly validate the pure-TS Montgomery ladder against the platform
@@ -65,14 +61,17 @@ test("Noise_XX_25519_AESGCM_SHA256 matches the official test vector", () => {
   const vector = loadVector()
   expect(vector.protocol_name).toBe(NOISE_PROTOCOL_NAME)
 
+  // The official vector carries 32-byte payloads in every message.
   const init = new NoiseHandshake({
     initiator: true,
+    allowHandshakePayload: true,
     prologue: hex(vector.init_prologue),
     staticKey: x25519FromPrivate(hex(vector.init_static)),
     ephemeralKey: x25519FromPrivate(hex(vector.init_ephemeral)),
   })
   const resp = new NoiseHandshake({
     initiator: false,
+    allowHandshakePayload: true,
     prologue: hex(vector.resp_prologue),
     staticKey: x25519FromPrivate(hex(vector.resp_static)),
     ephemeralKey: x25519FromPrivate(hex(vector.resp_ephemeral)),
@@ -165,10 +164,47 @@ test("v2: handshake messages with impossible lengths are rejected pre-auth", asy
   expect(() => b.readMessage(new Uint8Array(10))).toThrow(/too short/)
   const m1 = a.writeMessage(new Uint8Array(0))
   expect(m1).toHaveLength(32)
-  // Initiator's read (<- e, ee, s, es) needs at least 80 bytes.
+  // Initiator's read (<- e, ee, s, es) needs at least 96 bytes (P0-6).
   expect(() => a.readMessage(new Uint8Array(40))).toThrow(/too short/)
   // Oversized messages are rejected before any decryption work.
   expect(() => b.readMessage(new Uint8Array(MAX_NOISE_MESSAGE_BYTES + 1))).toThrow(/exceeds/)
+})
+
+test("P0-6: with empty payloads the three handshake messages are exactly 32, 96 and 64 bytes", () => {
+  const a = new NoiseHandshake({ initiator: true })
+  const b = new NoiseHandshake({ initiator: false })
+  const m1 = a.writeMessage(new Uint8Array(0))
+  expect(m1).toHaveLength(32)
+  // A 65,000-byte first message (the probe case) is not a legal -> e.
+  expect(() => b.readMessage(new Uint8Array(65_000))).toThrow(/unexpected length/)
+  // Padding a legal message with trailing bytes is rejected too.
+  const padded = new Uint8Array(m1.length + 1)
+  padded.set(m1)
+  expect(() => b.readMessage(padded)).toThrow(/unexpected length/)
+  b.readMessage(m1)
+  const m2 = b.writeMessage(new Uint8Array(0))
+  expect(m2).toHaveLength(96)
+  expect(() => a.readMessage(new Uint8Array([...m2, 0]))).toThrow(/unexpected length/)
+  a.readMessage(m2)
+  const m3 = a.writeMessage(new Uint8Array(0))
+  expect(m3).toHaveLength(64)
+  // Non-empty payloads cannot be written under the empty-payload policy.
+  expect(() => new NoiseHandshake({ initiator: true }).writeMessage(new Uint8Array([1]))).toThrow(/must be empty/)
+})
+
+test("P1-33: split() is single-use and the handshake emits no fourth message", () => {
+  const a = new NoiseHandshake({ initiator: true })
+  const b = new NoiseHandshake({ initiator: false })
+  b.readMessage(a.writeMessage(new Uint8Array(0)))
+  a.readMessage(b.writeMessage(new Uint8Array(0)))
+  b.readMessage(a.writeMessage(new Uint8Array(0)))
+  // Fourth message: neither side may write or read one.
+  expect(() => b.writeMessage(new Uint8Array(0))).toThrow(/already complete/)
+  expect(() => a.writeMessage(new Uint8Array(0))).toThrow(/already complete/)
+  expect(() => a.readMessage(new Uint8Array(96))).toThrow(/already complete/)
+  a.split()
+  // A second split would reuse nonce 0 under the same keys.
+  expect(() => a.split()).toThrow(/only be called once/)
 })
 
 test("v2: transport plaintext/ciphertext bounded by the Noise message limit", async () => {

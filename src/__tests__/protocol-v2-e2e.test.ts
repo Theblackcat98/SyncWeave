@@ -385,24 +385,39 @@ test("e2e: abort signal cancels an in-flight send", async () => {
       }).catch(() => null) // abort on the sender side is fine here
     })()
 
+    // Abort only once the transfer is provably in flight (>= 1 MiB reported
+    // by onProgress). A fixed wall-clock timer can fire during the pre-dial
+    // hash, before any socket exists (the cause of the old hang).
     const aborter = new AbortController()
-    const sendPromise = sendFiles({
+    let aborted = false
+    const sendErr = await sendFiles({
       host: "127.0.0.1",
       port: h.port,
       files: [{ path: p1, name: "cancelled.bin" }],
       expectedPeerId: receiverIdentity.peerId,
       identity: senderIdentity,
       signal: aborter.signal,
+      onProgress: (_index, _name, sent) => {
+        if (!aborted && sent >= 1_048_576) {
+          aborted = true
+          aborter.abort(new Error("cancelled by user"))
+        }
+      },
     }).then(
       () => null,
       (e: unknown) => e,
     )
-    // Let the transfer start, then cancel (this is what Esc now triggers).
-    await new Promise((r) => setTimeout(r, 200))
-    aborter.abort(new Error("cancelled by user"))
-    const sendErr = await sendPromise
     expect(sendErr).toBeInstanceOf(SendAbortedError)
-    await receiverDone
+    // The receiver must settle on the peer's CANCEL. Bound the wait so a
+    // regression fails fast instead of hanging the suite.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      receiverDone,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("receiver did not settle after CANCEL")), 10_000)
+      }),
+    ]).finally(() => clearTimeout(timer))
+    expect(await readdir(h.destDir)).toHaveLength(0)
   } finally {
     await cleanup(h)
   }

@@ -1,4 +1,5 @@
 import { createHash, getRandomValues, timingSafeEqual } from "node:crypto"
+import { PEER_ID_LENGTH } from "./peer-id.js"
 
 /**
  * Ephemeral, memory-only session authorization for the Phase 2 direct-transfer
@@ -32,6 +33,8 @@ import { createHash, getRandomValues, timingSafeEqual } from "node:crypto"
 export const SESSION_ID_BYTES = 16
 export const NONCE_BYTES = 16
 export const TOKEN_BYTES = 32
+/** Fixed length of a verified peer identity: a complete Peer ID (P1-36). */
+export const PEER_IDENTITY_BYTES = PEER_ID_LENGTH
 
 export interface SessionDescriptor {
   /** Unpredictable, short-lived session identifier. */
@@ -108,12 +111,35 @@ function randomBytes(n: number): Uint8Array {
   return out
 }
 
+/** Each field is prefixed with its u32 length, so no choice of field bytes can
+ *  make two different file sets encode alike (P1-36). */
+function lengthPrefixed(bytes: Uint8Array): Buffer {
+  const out = Buffer.alloc(4 + bytes.length)
+  out.writeUInt32BE(bytes.length, 0)
+  out.set(bytes, 4)
+  return out
+}
+
+/** Order-independent, injective digest of the exact file set (P1-36). */
 function filesBinding(files: readonly AuthorizedFile[]): Uint8Array {
-  const canonical = [...files]
-    .map((f) => `${f.name}\0${f.bytes}\0${f.sha256}`)
-    .sort()
-    .join("\n")
-  return createHash("sha256").update(canonical, "utf8").digest()
+  const entries = files
+    .map((f) =>
+      Buffer.concat([
+        lengthPrefixed(Buffer.from(f.name, "utf8")),
+        lengthPrefixed(Buffer.from(String(f.bytes), "utf8")),
+        lengthPrefixed(Buffer.from(f.sha256, "utf8")),
+      ]),
+    )
+    .sort(Buffer.compare)
+  const hash = createHash("sha256").update("syncweave-files-binding-v1", "utf8")
+  hash.update(lengthPrefixed(Buffer.from(String(entries.length), "utf8")))
+  for (const entry of entries) hash.update(lengthPrefixed(entry))
+  return hash.digest()
+}
+
+/** Injective key for one file, for membership tests (P1-36). */
+function fileKey(f: AuthorizedFile): string {
+  return JSON.stringify([f.name, f.bytes, f.sha256])
 }
 
 function tokenFor(
@@ -213,6 +239,11 @@ export class SessionManager {
     if (session.gateState !== "created") {
       throw new AuthorizationError("Identity confirmation is only valid in the created state")
     }
+    // P1-36: an identity is a complete, fixed-length Peer ID. An empty or
+    // partial value must never be accepted as a confirmed identity.
+    if (verifiedPeerIdentity.length !== PEER_IDENTITY_BYTES) {
+      throw new AuthorizationError(`Peer identity must be exactly ${PEER_IDENTITY_BYTES} bytes`)
+    }
     if (session.peerIdentity === null) {
       session.peerIdentity = Uint8Array.from(verifiedPeerIdentity)
     } else if (
@@ -279,9 +310,9 @@ export class SessionManager {
     if (acceptedFiles.length === 0) {
       throw new AuthorizationError("Acceptance requires at least one file")
     }
-    const authorized = new Set(presented.files.map((f) => `${f.name}\0${f.bytes}\0${f.sha256}`))
+    const authorized = new Set(presented.files.map(fileKey))
     for (const file of acceptedFiles) {
-      if (!authorized.has(`${file.name}\0${file.bytes}\0${file.sha256}`)) {
+      if (!authorized.has(fileKey(file))) {
         throw new AuthorizationError("Accepted file was not in the authorized set")
       }
     }
