@@ -32,7 +32,7 @@ test("real mode mounts, shows manual peer, and starts the receive loop", async (
   const discovery = {
     listPeers: () => [manualPeer],
     stop: () => {},
-  }
+  } as unknown as import("../services/discovery.js").DiscoveryService
   const real: RealTransport = {
     identity,
     listener,
@@ -57,8 +57,4 @@ test("real mode mounts, shows manual peer, and starts the receive loop", async (
   await new Promise((r) => setTimeout(r, 100))
   await setup.flush()
   expect(app.state.screen).toBe("workspace")
-  // Peer list should include the manual peer (via the 2s poll or initial sync).
-  // Initial sync runs synchronously in setupRealMode.
-  const text = setup.renderer.getRenderedOutput?.() ?? ""
-  expect(typeof text === "string" || text).toBeTruthy()
 })
