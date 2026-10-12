@@ -40,7 +40,22 @@ if (!realMode) {
 } else {
   // Real mode: live identity, TCP listener, UDP-multicast discovery.
   const identity = generateEphemeralIdentity()
-  const listener = await listenNoise({ host: "0.0.0.0", port: tcpPort })
+  let listener: Awaited<ReturnType<typeof listenNoise>>
+  try {
+    listener = await listenNoise({ host: "0.0.0.0", port: tcpPort })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.includes("EADDRINUSE")) {
+      console.error(
+        `\nPort ${tcpPort} is already in use — another SyncWeave instance is probably running.\n` +
+        `Start this instance on a different port, e.g. --port ${tcpPort + 1}, ` +
+        `and point the two at each other with --peer 127.0.0.1:<port>.\n`,
+      )
+    } else {
+      console.error(`Failed to start the TCP listener: ${message}`)
+    }
+    process.exit(1)
+  }
   const discovery = new DiscoveryService()
   try {
     await discovery.start({ alias, peerId: identity.peerId, tcpPort })
