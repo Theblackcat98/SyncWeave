@@ -295,3 +295,51 @@ test("peer-id: generated identities are unique and verify exactly", async () => 
   expect(peerIdFromPublicKey(a.publicKey)).toBe(a.peerId)
   await mkdir(tmpdir(), { recursive: true })
 })
+
+import {
+  enforceBudgets,
+  validateProtocolFiles,
+  validateIdentityProofBody,
+  BUDGET_MAX_FILES,
+} from "../services/transfer-protocol.js"
+
+function goodFile(name = "a.txt", bytes = 100): { name: string; bytes: number; sha256: string } {
+  return { name, bytes, sha256: "a".repeat(64) }
+}
+
+test("budgets: receiver-side enforcement rejects over-limit sessions", () => {
+  // 26 files
+  expect(() =>
+    enforceBudgets(Array.from({ length: BUDGET_MAX_FILES + 1 }, (_, i) => goodFile(`f${i}.txt`)), "receive"),
+  ).toThrow(/file count/)
+  // total over 10 GiB via many 2 GiB files
+  expect(() =>
+    enforceBudgets(Array.from({ length: 6 }, (_, i) => goodFile(`f${i}.txt`, 2 * 1024 * 1024 * 1024)), "receive"),
+  ).toThrow(/session total/)
+  // single file over 2 GiB
+  expect(() => enforceBudgets([goodFile("big.bin", 2 * 1024 * 1024 * 1024 + 1)], "receive")).toThrow(/too large/)
+  // negative / non-integer sizes
+  expect(() => enforceBudgets([{ ...goodFile(), bytes: -5 }], "receive")).toThrow(/invalid file size/)
+  expect(() => enforceBudgets([{ ...goodFile(), bytes: 1.5 }], "receive")).toThrow(/invalid file size/)
+  // empty set
+  expect(() => enforceBudgets([], "receive")).toThrow(/file count/)
+  // exactly at limits passes
+  expect(() =>
+    enforceBudgets(Array.from({ length: BUDGET_MAX_FILES }, (_, i) => goodFile(`f${i}.txt`, 10)), "receive"),
+  ).not.toThrow()
+})
+
+test("validation: malformed protocol JSON fails closed", () => {
+  expect(() => validateProtocolFiles("nope", "t")).toThrow(/not an array/)
+  expect(() => validateProtocolFiles([null], "t")).toThrow(/not an object/)
+  expect(() => validateProtocolFiles([{ ...goodFile(), name: "" }], "t")).toThrow(/bad file name/)
+  expect(() => validateProtocolFiles([{ ...goodFile(), sha256: "zzz" }], "t")).toThrow(/bad sha256/)
+  expect(() => validateProtocolFiles([{ ...goodFile(), sha256: "A".repeat(64) }], "t")).toThrow(/bad sha256/)
+  expect(() => validateIdentityProofBody({})).toThrow(/bad peerId/)
+  expect(() =>
+    validateIdentityProofBody({ peerId: "x", identityPublicKey: "y" }),
+  ).toThrow(/bad identitySignature/)
+  expect(() =>
+    validateIdentityProofBody({ peerId: "x", identityPublicKey: "y", identitySignature: "z" }),
+  ).not.toThrow()
+})

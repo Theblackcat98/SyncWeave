@@ -53,6 +53,33 @@ import { receiveToFile, sanitizePeerBasename } from "./safe-receive-sink.js"
 const CHUNK_BYTES = 64 * 1024
 const APP_MAX_BODY = 16 * 1024 * 1024
 const APP_MAX_NAME_BYTES = 255
+/** Resource budgets (Nick's recorded decisions): enforced on BOTH endpoints.
+ * The sender checks before transmitting; the receiver re-checks the
+ * advertised metadata before authorizing, so a malicious sender cannot
+ * make the receiver accept an over-budget session. */
+export const BUDGET_MAX_FILES = 25
+export const BUDGET_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+export const BUDGET_MAX_SESSION_BYTES = 10 * 1024 * 1024 * 1024
+
+/** Fail closed unless the advertised file set fits every budget. */
+export function enforceBudgets(files: readonly ProtocolFile[], what: string): void {
+  if (files.length === 0 || files.length > BUDGET_MAX_FILES) {
+    throw new Error(`${what}: file count must be 1-${BUDGET_MAX_FILES}`)
+  }
+  let total = 0
+  for (const f of files) {
+    if (!Number.isSafeInteger(f.bytes) || f.bytes < 0) {
+      throw new Error(`${what}: invalid file size for ${f.name}`)
+    }
+    if (f.bytes > BUDGET_MAX_FILE_BYTES) {
+      throw new Error(`${what}: file too large: ${f.name}`)
+    }
+    total += f.bytes
+    if (total > BUDGET_MAX_SESSION_BYTES) {
+      throw new Error(`${what}: session total exceeds 10 GiB`)
+    }
+  }
+}
 
 export interface ProtocolFile {
   name: string
@@ -140,6 +167,53 @@ function parseJsonBody(header: FrameHeader, body: Uint8Array, what: string): unk
   }
 }
 
+/**
+ * Shape validation for incoming JSON protocol bodies. JSON.parse returns
+ * `unknown`; every field the protocol acts on is checked here so a
+ * malformed or hostile body fails closed instead of flowing into
+ * authorization, file I/O, or crypto as a blind `as` cast.
+ */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+export function validateProtocolFiles(files: unknown, what: string): asserts files is ProtocolFile[] {
+  if (!Array.isArray(files)) {
+    throw new Error(`malformed ${what}: files is not an array`)
+  }
+  for (const f of files) {
+    if (!isRecord(f)) {
+      throw new Error(`malformed ${what}: file entry is not an object`)
+    }
+    if (typeof f.name !== "string" || f.name.length === 0 || Buffer.byteLength(f.name, "utf8") > APP_MAX_NAME_BYTES) {
+      throw new Error(`malformed ${what}: bad file name`)
+    }
+    if (typeof f.bytes !== "number" || !Number.isSafeInteger(f.bytes) || f.bytes < 0) {
+      throw new Error(`malformed ${what}: bad file size for ${f.name}`)
+    }
+    if (typeof f.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(f.sha256)) {
+      throw new Error(`malformed ${what}: bad sha256 for ${f.name}`)
+    }
+  }
+}
+
+export function validateIdentityProofBody(body: unknown): asserts body is IdentityProofBody {
+  if (!isRecord(body)) {
+    throw new Error("malformed identity proof: not an object")
+  }
+  for (const k of ["peerId", "identityPublicKey", "identitySignature"] as const) {
+    if (typeof body[k] !== "string" || (body[k] as string).length === 0) {
+      throw new Error(`malformed identity proof: bad ${k}`)
+    }
+  }
+}
+
+export function validateSha256Body(body: unknown): asserts body is { sha256: string } {
+  if (!isRecord(body) || typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(body.sha256)) {
+    throw new Error("malformed file-end: bad sha256")
+  }
+}
+
 async function readFrame(
   parser: FrameParser,
   signal?: AbortSignal,
@@ -203,22 +277,16 @@ export interface SendOptions {
 /** Sender side: dial, handshake, Gate B, Gate C, then stream files. */
 export async function sendFiles(options: SendOptions): Promise<void> {
   const { host, port, expectedPeerId, signal } = options
-  if (options.files.length === 0 || options.files.length > 25) {
-    throw new Error("file count must be 1-25")
+  if (options.files.length === 0 || options.files.length > BUDGET_MAX_FILES) {
+    throw new Error(`file count must be 1-${BUDGET_MAX_FILES}`)
   }
   // Hash and measure every file up front (bounded: 25 files).
   const files: Array<ProtocolFile & { path: string }> = []
   for (const f of options.files) {
     const { bytes, sha256 } = await sha256File(f.path)
-    if (bytes > 2 * 1024 * 1024 * 1024) {
-      throw new Error(`file too large: ${f.name}`)
-    }
     files.push({ path: f.path, name: f.name, bytes, sha256 })
   }
-  const total = files.reduce((n, f) => n + f.bytes, 0)
-  if (total > 10 * 1024 * 1024 * 1024) {
-    throw new Error("session total exceeds 10 GiB")
-  }
+  enforceBudgets(files, "send")
 
   const identity = options.identity ?? generateEphemeralIdentity()
   const sessions = new SessionManager()
@@ -244,8 +312,9 @@ export async function sendFiles(options: SendOptions): Promise<void> {
     if (confirm.header.type !== FrameType.IdentityConfirm) {
       throw new Error("expected identity confirmation")
     }
-    const proof = parseJsonBody(confirm.header, confirm.body, "identity proof") as IdentityProofBody
-    const verifiedPeerId = verifyProof(proof, hs.handshakeHash, expectedPeerId)
+    const proofBody: unknown = parseJsonBody(confirm.header, confirm.body, "identity proof")
+    validateIdentityProofBody(proofBody)
+    const verifiedPeerId = verifyProof(proofBody, hs.handshakeHash, expectedPeerId)
     const verifiedIdentity = new TextEncoder().encode(verifiedPeerId)
     sessions.recordIdentityConfirmation(session.id, "remote", verifiedIdentity)
 
@@ -267,9 +336,10 @@ export async function sendFiles(options: SendOptions): Promise<void> {
     if (accept.header.type !== FrameType.TransferAccept) {
       throw new Error("expected transfer acceptance")
     }
-    const acceptedBody = parseJsonBody(accept.header, accept.body, "transfer acceptance") as {
-      files: ProtocolFile[]
-    }
+    const acceptedRaw: unknown = parseJsonBody(accept.header, accept.body, "transfer acceptance")
+    if (!isRecord(acceptedRaw)) throw new Error("malformed transfer acceptance: not an object")
+    validateProtocolFiles(acceptedRaw.files, "transfer acceptance")
+    const acceptedBody = acceptedRaw as { files: ProtocolFile[] }
     const accepted = sessions.acceptTransfer(auth, verifiedIdentity, acceptedBody.files)
     parser.transitionTo("sending")
 
@@ -343,8 +413,9 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     if (open.header.type !== FrameType.SessionOpen) {
       throw new Error("expected session open")
     }
-    const senderProof = parseJsonBody(open.header, open.body, "identity proof") as IdentityProofBody
-    const verifiedSenderId = verifyProof(senderProof, handshakeHash, expectedPeerId)
+    const senderProofBody: unknown = parseJsonBody(open.header, open.body, "identity proof")
+    validateIdentityProofBody(senderProofBody)
+    const verifiedSenderId = verifyProof(senderProofBody, handshakeHash, expectedPeerId)
     const senderIdentity = new TextEncoder().encode(verifiedSenderId)
     sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
     sessions.recordIdentityConfirmation(session.id, "remote", senderIdentity)
@@ -361,14 +432,18 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     if (request.header.type !== FrameType.TransferRequest) {
       throw new Error("expected transfer request")
     }
-    const requestBody = parseJsonBody(request.header, request.body, "transfer request") as {
-      files: ProtocolFile[]
-    }
+    const requestRaw: unknown = parseJsonBody(request.header, request.body, "transfer request")
+    if (!isRecord(requestRaw)) throw new Error("malformed transfer request: not an object")
+    validateProtocolFiles(requestRaw.files, "transfer request")
+    const requestBody = requestRaw as { files: ProtocolFile[] }
+    // Mirror the sender budgets on the receiver: a malicious sender must
+    // not be able to make us authorize an over-budget session.
+    enforceBudgets(requestBody.files, "receive")
     const auth = sessions.authorizeTransfer(session.id, requestBody.files)
     parser.transitionTo("request-review")
 
     // 4. Gate C: the user's explicit, separate acceptance of the exact set.
-    const accepted = await onTransferRequest({ peerId: senderProof.peerId, files: requestBody.files })
+    const accepted = await onTransferRequest({ peerId: senderProofBody.peerId, files: requestBody.files })
     const acceptedTransfer = sessions.acceptTransfer(auth, senderIdentity, accepted)
     const requestId = request.header.extension.get(ExtensionKey.RequestId) ?? new Uint8Array(0)
     const acceptExt = new Map([
@@ -386,7 +461,9 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
       if (header.header.type !== FrameType.FileHeader) {
         throw new Error("expected file header")
       }
-      const fileMeta = parseJsonBody(header.header, header.body, "file header") as ProtocolFile
+      const fileMetaRaw: unknown = parseJsonBody(header.header, header.body, "file header")
+      validateProtocolFiles([fileMetaRaw], "file header")
+      const fileMeta = fileMetaRaw as ProtocolFile
       if (fileMeta.sha256 !== file.sha256 || fileMeta.bytes !== file.bytes) {
         throw new Error("file header does not match the accepted file")
       }
@@ -397,7 +474,9 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
         for (;;) {
           const frame = await readFrame(parser, signal)
           if (frame.header.type === FrameType.FileEnd) {
-            const endBody = parseJsonBody(frame.header, frame.body, "file end") as { sha256: string }
+            const endRaw: unknown = parseJsonBody(frame.header, frame.body, "file end")
+            validateSha256Body(endRaw)
+            const endBody = endRaw
             if (endBody.sha256 !== file.sha256) {
               throw new Error("file end hash mismatch")
             }
