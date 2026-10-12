@@ -49,7 +49,12 @@ afterEach(async () => {
   }
 })
 
-async function makeInstance(label: string, files: Record<string, string>, discoveryPeers: DiscoveredPeer[] = []): Promise<Instance> {
+async function makeInstance(
+  label: string,
+  files: Record<string, string>,
+  discoveryPeers: DiscoveredPeer[] = [],
+  options: { sasConfirmTimeoutMs?: number } = {},
+): Promise<Instance> {
   const base = await mkdtemp(join(tmpdir(), `app-real-${label}-`))
   const root = join(base, "local")
   const receiveDir = join(base, "Downloads")
@@ -82,6 +87,7 @@ async function makeInstance(label: string, files: Record<string, string>, discov
     receiveDestinations: [receiveDir],
     mode: "real",
     real,
+    sasConfirmTimeoutMs: options.sasConfirmTimeoutMs,
   })
   await setup.flush()
   const instance: Instance = { label, base, root, receiveDir, port: listener.port, announcedPeerId, discoveryPeers, listener, setup, app }
@@ -226,6 +232,35 @@ test("Esc at the SAS prompt cancels the send before any file metadata is sent", 
   expect(sender.app.state.transferQueue[0]?.status).toBe("cancelled")
   expect(receiver.app.state.request).toBeNull()
   expect(await stat(join(receiver.receiveDir, "cancel.txt")).catch(() => null)).toBeNull()
+}, TEST_TIMEOUT_MS)
+
+test("an unattended SAS prompt times out, reports it, and frees the sender for the next send (P2)", async () => {
+  const receiver = await makeInstance("receiver", {})
+  // Short injectable timeout instead of 90 real seconds.
+  const sender = await makeInstance("sender", { "timeout.txt": "unattended\n" }, [{
+    peerId: receiver.announcedPeerId,
+    alias: "receiver",
+    address: "127.0.0.1",
+    tcpPort: receiver.port,
+    lastSeen: Date.now(),
+  }], { sasConfirmTimeoutMs: 300 })
+  await stageFirstAndReview(sender)
+  await press(sender, ENTER)
+  await waitFor("sender SAS prompt", () => sender.app.state.sendSasConfirm)
+  // No keypress: the timeout must settle the parked prompt as a timeout.
+  await waitFor("sender SAS timeout", () => !sender.app.state.sending && sender.app.state.screen === "workspace")
+  expect(sender.app.state.status).toBe("SAS confirm timed out · send cancelled")
+  expect(sender.app.state.transferQueue[0]?.status).toBe("cancelled")
+  expect(sender.app.state.staged.local.size).toBe(1)
+  expect(receiver.app.state.request).toBeNull()
+  expect(await stat(join(receiver.receiveDir, "timeout.txt")).catch(() => null)).toBeNull()
+  // The pipeline is not wedged: a subsequent send reaches the SAS prompt again
+  // instead of being rejected with "Send already in progress".
+  await press(sender, "s")
+  expect(sender.app.state.screen).toBe("send-review")
+  await press(sender, ENTER)
+  await waitFor("second SAS prompt", () => sender.app.state.sendSasConfirm)
+  expect(sender.app.state.sending).toBe(true)
 }, TEST_TIMEOUT_MS)
 
 test("the sender cancelling during consent clears the receiver's prompt", async () => {

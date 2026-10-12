@@ -32,6 +32,9 @@ type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
 const DISPOSE_SETTLE_MS = 3000
 /** Delay before the SAS prompt accepts Enter/y: the keypress that started the send must not confirm it. */
 export const SAS_CONFIRM_ARM_MS = 400
+/** How long the SAS prompt waits for the user before it settles false (P2): an
+ *  unattended sender must not wedge the pipeline with `state.sending` stuck true. */
+export const SAS_CONFIRM_TIMEOUT_MS = 90_000
 /** Peer IDs start with a fixed 6-character multibase/protobuf prefix that carries no entropy. */
 const PEER_ID_FIXED_PREFIX = 6
 /** Random characters shown for an unverified sender's fingerprint (4-character groups). */
@@ -112,6 +115,11 @@ export interface AppDependencies {
   mode?: AppMode
   /** Required in real mode: the live transport bundle. */
   real?: RealTransport
+  /**
+   * SAS prompt timeout in ms (P2). Defaults to SAS_CONFIRM_TIMEOUT_MS (90s).
+   * Injectable so tests can use a short timeout instead of waiting 90 real seconds.
+   */
+  sasConfirmTimeoutMs?: number
 }
 
 export interface SyncWeaveApp {
@@ -1289,18 +1297,42 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     const claimedAlias = (address: string | null): string | null =>
       address === null ? null : real.discovery.listPeers().find((item) => item.address === address)?.alias ?? null
 
-    // One session at a time (per the budget). A failure in one session never
-    // ends the loop; only a listener-level failure does.
+    // One session at a time (per the budget). The loop never blocks on the
+    // active session: a handshake that arrives while one is running is
+    // rejected fast (channel closed, visible "busy" status) instead of
+    // parking silently in the backlog with no feedback to the sender.
+    // A failure in one session never ends the loop; only a listener-level
+    // failure does.
+    let receiving = false
     const receiveLoop = async (): Promise<void> => {
+      let current: Promise<void> | null = null
       for await (const hs of real.listener.accept()) {
         if (disposed) break
-        try {
-          await track(receiveSession(hs, real, claimedAlias))
-        } catch (error) {
-          state.status = `Receive failed: ${errorText(error)}`
+        if (receiving) {
+          // Busy: close the new channel promptly so the sender learns the
+          // receiver is occupied instead of hanging, and say so on screen.
+          hs.channel.abort()
+          state.status = "Busy — one transfer at a time; try again shortly"
+          logEvent("receive-busy-reject", `rejected handshake from ${remoteAddressOf(hs) ?? "unknown address"}`)
           renderSafely()
+          continue
         }
+        receiving = true
+        current = track(receiveSession(hs, real, claimedAlias))
+          .catch((error: unknown) => {
+            state.status = `Receive failed: ${errorText(error)}`
+            renderSafely()
+          })
+          .finally(() => {
+            receiving = false
+            current = null
+          })
+        // Deliberately not awaited: the loop stays responsive so it can
+        // reject-while-busy. Single-session is enforced by `receiving` above.
       }
+      // dispose() may break the loop mid-session; let it settle so the
+      // inFlight accounting used by dispose() stays correct.
+      await current
     }
     void receiveLoop().catch((error: unknown) => {
       // Listener-level failure: surface it instead of going silently deaf.
@@ -1314,7 +1346,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function askSendSas(
     info: { sas: string; peerId: string; signal: AbortSignal },
     peerName: string,
-    outcome: { rejected: boolean },
+    outcome: { rejected: boolean; timedOut: boolean },
   ): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       if (info.signal.aborted) {
@@ -1322,15 +1354,28 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         resolve(false)
         return
       }
+      let timer: ReturnType<typeof setTimeout> | null = null
+      let timedOut = false
       const prompt: SasPrompt = {
         armedAt: Date.now() + SAS_CONFIRM_ARM_MS,
         settle: (confirmed) => {
           if (sasPrompt !== prompt) return
+          if (timer !== null) {
+            clearTimeout(timer)
+            timer = null
+          }
           sasPrompt = null
           state.sendSasConfirm = null
-          if (!confirmed) outcome.rejected = true
-          state.status = confirmed ? "Code confirmed · sending the file list…" : "Code not confirmed · send cancelled"
-          logEvent("sas-confirm", confirmed ? "confirmed" : "rejected")
+          if (!confirmed) {
+            outcome.rejected = true
+            if (timedOut) outcome.timedOut = true
+          }
+          state.status = confirmed
+            ? "Code confirmed · sending the file list…"
+            : timedOut
+              ? "SAS confirm timed out · send cancelled"
+              : "Code not confirmed · send cancelled"
+          logEvent("sas-confirm", confirmed ? "confirmed" : timedOut ? "timeout" : "rejected")
           renderSafely()
           resolve(confirmed)
         },
@@ -1338,6 +1383,15 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       sasPrompt = prompt
       state.sendSasConfirm = { sas: info.sas, peerFingerprint: formatPeerFingerprint(info.peerId), peerName }
       state.status = `Compare code ${info.sas} with the receiver's screen · Enter confirms, Esc rejects`
+      // P2: an unattended sender must not park here forever with state.sending
+      // stuck true. The timeout settles false like a dismissal, mirroring the
+      // consent-timeout path; the timer is cleared on every other settle path.
+      const timeoutMs = dependencies.sasConfirmTimeoutMs ?? SAS_CONFIRM_TIMEOUT_MS
+      timer = setTimeout(() => {
+        timer = null
+        timedOut = true
+        prompt.settle(false)
+      }, timeoutMs)
       info.signal.addEventListener("abort", () => prompt.settle(false), { once: true })
       renderSafely()
     })
@@ -1410,7 +1464,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
     const fileList = files.map((f) => ({ path: f.id, name: f.name }))
     const sendAbort = new AbortController()
-    const sasOutcome = { rejected: false }
+    const sasOutcome = { rejected: false, timedOut: false }
     sendAborter = sendAbort
     state.sending = true
     const record: TransferRecord = {
@@ -1476,6 +1530,11 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       record.acceptedFiles = okNames
       if (sendAbort.signal.aborted) {
         state.status = `Send cancelled · ${okNames.length}/${fileList.length} confirmed by receiver`
+        record.status = "cancelled"
+      } else if (sasOutcome.timedOut) {
+        // P2: the SAS prompt timed out — the status line from askSendSas would
+        // otherwise be overwritten here by the generic rejection message.
+        state.status = "SAS confirm timed out · send cancelled"
         record.status = "cancelled"
       } else if (sasOutcome.rejected) {
         state.status = "Send cancelled · security code not confirmed"

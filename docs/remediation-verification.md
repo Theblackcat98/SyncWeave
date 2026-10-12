@@ -1,5 +1,9 @@
 # Remediation verification
 
+> **SUPERSEDED.** This document verified `main` at `7f0c0d1`. The round-2
+> remediation (PR #32, merged as `4dcff52`) and subsequent fixes supersede
+> it. Kept as a historical record; do not treat its verdicts as current.
+
 Verified: 2026-10-12 · Plan: [`docs/remediation-plan.md`](remediation-plan.md) (audit of `a87d307`) · Code verified: `main` at `7f0c0d1` (27 commits after the audit)
 
 Six parallel verifiers each took one slice of the plan:

@@ -36,7 +36,7 @@ What does not work yet, or is not verified, as of the 0.1.0 remediation round
 - **Discovery names are not authenticated.** Anyone can announce any alias. Compare the
   security code for every transfer. There is no pairing and no TOFU pinning, so a
   known name is not trusted.
-- **Peer ID display is weak.** The short Peer ID shown on screen has only six random
+- **Peer ID display is weak.** The short Peer ID shown on screen has only 24 random
   characters, so do not compare Peer IDs. Compare the security code. *Open* (P1-35).
 - **Pre-consent memory is loosely bounded.** A peer that completes the handshake can
   make the receiver buffer data before consent. The per-connection cap before consent
@@ -82,7 +82,9 @@ What does not work yet, or is not verified, as of the 0.1.0 remediation round
 - **Two-process loopback e2e is not in CI.** The loopback tests run in-process inside
   `bun test`. A job that runs two real processes is not yet in CI. *Open* (P1-50).
 - **Lint is partial.** Biome runs in lint-only mode. Rules that flag the existing style
-  are off. `noUnsafeFinally` is off until R8 is fixed. Biome reports 11 warnings for
+  are off. `noUnsafeFinally` is still off in `biome.json`, but the R8
+  finally-block issue that motivated the exception is fixed, so the rule can be
+  re-enabled. Biome reports 11 warnings for
   unused imports, variables and parameters in `src/`. *Open.*
 - **Strict unused-declaration checks are off.** `noUnusedLocals` and `noUnusedParameters`
   would report 11 errors in `src/`, including an unused `fileIndex` in `app.ts`.

@@ -19,7 +19,7 @@ export function resolveStateDir(): string | null {
   try {
     const base = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "share")
     stateDir = join(base, "syncweave")
-    mkdirSync(stateDir, { recursive: true })
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 })
     return stateDir
   } catch {
     stateDisabled = true

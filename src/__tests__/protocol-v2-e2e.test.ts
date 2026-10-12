@@ -369,7 +369,14 @@ test("e2e: consent deadline → silent peer's transfer declines after timeout", 
 test("e2e: abort signal cancels an in-flight send", async () => {
   const h = await startHarness()
   try {
-    const p1 = await writeTestFile(h.senderDir, "cancelled.bin", 50_000_000)
+    // 4 MiB keeps the pre-send SHA-256 hash and the byte-fill cheap under
+    // full-suite contention (the old 50 MiB file blew the 30 s timeout in
+    // 5/6 runs: hashing always covers the whole file before the first
+    // chunk streams). The abort still lands provably mid-stream: chunks are
+    // ~64 KiB, so >= 1 MiB onProgress means ~16 chunks are on the wire and
+    // the per-chunk throwIfAborted() observes the abort on the very next
+    // iteration — deterministic, no wall-clock race.
+    const p1 = await writeTestFile(h.senderDir, "cancelled.bin", 4_000_000)
     const senderIdentity = generateEphemeralIdentity()
     const receiverIdentity = generateEphemeralIdentity()
 

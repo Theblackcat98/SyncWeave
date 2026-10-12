@@ -93,9 +93,26 @@ if (!realMode) {
     transferService: new MockTransferService(),
     receiveDestinations: mockDestinations,
   })
-  renderer.on("destroy", () => {
-    void app.dispose()
-  })
+  // One shutdown path for Ctrl+C, SIGINT/SIGTERM/SIGHUP and renderer
+  // teardown: dispose the app, restore the terminal, then exit explicitly.
+  // SIGTERM/SIGHUP (kill, terminal close, SSH drop) must clean up like
+  // Ctrl+C does, otherwise the terminal is left in raw mode.
+  let shuttingDown = false
+  const shutdown = (): void => {
+    if (shuttingDown) return
+    shuttingDown = true
+    logEvent("session-stop")
+    void app.dispose().finally(() => {
+      try {
+        renderer.destroy()
+      } catch { /* already torn down */ }
+      process.exit(0)
+    })
+  }
+  process.on("SIGTERM", shutdown)
+  process.on("SIGHUP", shutdown)
+  process.on("SIGINT", shutdown)
+  renderer.on("destroy", shutdown)
   renderer.start()
 } else {
   // The receive sink requires an existing, writable directory. Create it and

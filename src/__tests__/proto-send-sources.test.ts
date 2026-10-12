@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdir, mkdtemp, rm, truncate } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -138,3 +138,35 @@ test("R7: an abort during pre-dial hashing stops within one read and never dials
     expect(Date.now() - started).toBeLessThan(2_000)
   })
 }, 30_000)
+
+test("P5: a symlink swapped in after listing is refused (O_NOFOLLOW); the target's bytes are never sent", async () => {
+  await withDir(async (dir) => {
+    // Stage a regular file, then swap it for a symlink to a secret between
+    // listing and send (TOCTOU). The send must fail closed: refuse the file
+    // with a clear per-file message before any byte of the target is hashed.
+    const victim = join(dir, "doc.txt")
+    await writeFile(victim, "public content")
+    const secret = join(dir, "secret.txt")
+    await writeFile(secret, "TOP SECRET - must never be sent")
+    await rm(victim)
+    await symlink(secret, victim)
+
+    const hashed: string[] = []
+    const error = await sendFiles({
+      host: "127.0.0.1",
+      port: UNUSED_PORT,
+      files: [{ path: victim, name: "doc.txt" }],
+      identity: generateEphemeralIdentity(),
+      onHashProgress: (_i, _n, name) => {
+        hashed.push(name)
+      },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    // Fail closed: clear per-file message naming the symlink...
+    expect((error as Error).message).toMatch(/cannot send doc\.txt: .*symbolic link/i)
+    // ...and the target was never hashed (so never sent).
+    expect(hashed).toEqual([])
+  })
+}, 15_000)
