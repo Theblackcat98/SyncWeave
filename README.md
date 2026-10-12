@@ -45,7 +45,7 @@ Press `?` anywhere.
 
 ![Help screen](docs/screenshots/05-help.png)
 
-> Screenshots were captured from the app's own test renderer in mock mode (`SYNCWEAVE_ASCII=1`). The layout is identical in real mode; only the data is simulated.
+> Screenshots were captured from the app's own test renderer — real frames, real theme, real Nerd Font icons. Mock mode is shown; the layout is identical in real mode.
 
 ## Modes
 

@@ -1,4 +1,4 @@
-/** Capture TUI screens as text frames for README screenshots. */
+/** Capture TUI screens as styled spans for true-color README screenshots. */
 import { writeFileSync, mkdirSync } from "node:fs"
 import { createTestRenderer } from "@opentui/core/testing"
 import { createSyncWeaveApp, type AppDependencies } from "../src/app.js"
@@ -7,6 +7,7 @@ import { MockPeerService } from "../src/services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "../src/services/mock-transfer-service.js"
 
 process.env.SYNCWEAVE_REDUCED_MOTION = "1"
+// NOTE: NOT setting SYNCWEAVE_ASCII — capture what a real user sees.
 
 const OUT = "docs/screenshots"
 mkdirSync(OUT, { recursive: true })
@@ -20,50 +21,33 @@ function mockDependencies(): AppDependencies {
   }
 }
 
-async function capture(name: string, setup: () => Promise<void>, width = 120, height = 36) {
-  const renderer = await createTestRenderer({ width, height })
-  const app = createSyncWeaveApp(renderer.renderer, mockDependencies())
-  await renderer.flush()
-  await setup()
-  await renderer.flush()
-  // Let any animation settle
-  await new Promise((r) => setTimeout(r, 100))
-  await renderer.flush()
-  const frame = renderer.captureCharFrame()
-  writeFileSync(`${OUT}/${name}.txt`, frame)
-  console.log(`captured ${name}: ${frame.split("\n").length} lines`)
-  app.dispose()
-  await renderer.renderer.destroy()
-}
+type Span = { text: string; fg: [number, number, number]; bg: [number, number, number] }
 
-// 1. Workspace (default)
-await capture("01-workspace", async () => {})
-
-// 2. Workspace with staged files
-await capture("02-workspace-staged", async () => {
-  // stage handled inside via direct access below
-})
-
-// We'll do interactive ones with direct app access
-import { createTestRenderer as ctr } from "@opentui/core/testing"
-
-async function interactive(name: string, actions: (ctx: { setup: any; app: any }) => Promise<void>, width = 120, height = 36) {
-  const setup = await ctr({ width, height })
+async function capture(name: string, actions: (ctx: { setup: any; app: any }) => Promise<void>, width = 120, height = 36) {
+  const setup = await createTestRenderer({ width, height })
   const app = createSyncWeaveApp(setup.renderer, mockDependencies())
   await setup.flush()
   await actions({ setup, app })
   await setup.flush()
-  await new Promise((r) => setTimeout(r, 100))
+  await new Promise((r) => setTimeout(r, 150))
   await setup.flush()
-  const frame = setup.captureCharFrame()
-  writeFileSync(`${OUT}/${name}.txt`, frame)
-  console.log(`captured ${name}`)
+  const captured = setup.captureSpans() as { cols: number; rows: number; lines: Array<{ spans: any[] }> }
+  const lines: Span[][] = captured.lines.map((line) =>
+    line.spans.map((s) => ({
+      text: s.text as string,
+      fg: [s.fg.buffer[0], s.fg.buffer[1], s.fg.buffer[2]] as [number, number, number],
+      bg: [s.bg.buffer[0], s.bg.buffer[1], s.bg.buffer[2]] as [number, number, number],
+    })),
+  )
+  writeFileSync(`${OUT}/${name}.spans.json`, JSON.stringify({ cols: captured.cols, rows: captured.rows, lines }))
+  console.log(`captured ${name}: ${lines.length} rows`)
   app.dispose()
-  await setup.renderer.destroy()
+  try { await setup.renderer.destroy() } catch {}
 }
 
-// Workspace with staged files: press space on a few entries
-await interactive("02-workspace-staged", async ({ setup }) => {
+await capture("01-workspace", async () => {})
+
+await capture("02-workspace-staged", async ({ setup }) => {
   setup.mockInput.pressKey(" ")
   await setup.flush()
   setup.mockInput.pressKey("ARROW_DOWN")
@@ -72,8 +56,7 @@ await interactive("02-workspace-staged", async ({ setup }) => {
   await setup.flush()
 })
 
-// Send review screen
-await interactive("03-send-review", async ({ setup }) => {
+await capture("03-send-review", async ({ setup }) => {
   setup.mockInput.pressKey(" ")
   await setup.flush()
   setup.mockInput.pressKey("ARROW_DOWN")
@@ -84,31 +67,26 @@ await interactive("03-send-review", async ({ setup }) => {
   await setup.flush()
 })
 
-// Incoming consent screen
-await interactive("04-consent-incoming", async ({ setup }) => {
+await capture("04-consent-incoming", async ({ setup }) => {
   setup.mockInput.pressKey("i")
   await setup.flush()
 })
 
-// Help screen
-await interactive("05-help", async ({ setup }) => {
+await capture("05-help", async ({ setup }) => {
   setup.mockInput.pressKey("?")
   await setup.flush()
 })
 
-// Peers screen
-await interactive("06-peers", async ({ setup }) => {
+await capture("06-peers", async ({ setup }) => {
   setup.mockInput.pressKey("q")
   await setup.flush()
 })
 
-// Transfer progress: accept incoming and catch it mid-flight
-await interactive("07-transfer", async ({ setup, app }) => {
+await capture("07-transfer", async ({ setup }) => {
   setup.mockInput.pressKey("i")
   await setup.flush()
-  setup.mockInput.pressEnter() // accept all
+  setup.mockInput.pressEnter()
   await setup.flush()
-  // transfer screen should be showing or progress running
 })
 
 console.log("done")
