@@ -26,6 +26,12 @@ export interface MockPeer {
   port: number
   fingerprint: string
   online: boolean
+  /** The alias is self-asserted by a discovery announcement (unverified). */
+  aliasClaimed?: boolean
+  /** Another listed peer has the same alias. */
+  aliasDuplicate?: boolean
+  /** performance.now() of the last alias, address or port change seen for this peer. */
+  changedAt?: number
 }
 
 /** A favorite is only a locally remembered destination; it is not verified trust. */
