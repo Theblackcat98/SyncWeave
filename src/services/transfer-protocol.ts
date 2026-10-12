@@ -706,10 +706,33 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     bytes: s.bytes,
     sha256: s.sha256,
   }))
-  enforceBudgets(files, "send")
+  // Budget and identity checks must not leak the open snapshots on failure.
+  try {
+    enforceBudgets(files, "send")
+  } catch (error) {
+    for (const s of snapshots) {
+      try {
+        await s.handle.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    throw error
+  }
 
   const identity = options.identity ?? generateEphemeralIdentity()
-  claimIdentity(identity)
+  try {
+    claimIdentity(identity)
+  } catch (error) {
+    for (const s of snapshots) {
+      try {
+        await s.handle.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    throw error
+  }
   const sessions = new SessionManager()
   let channel: NoiseChannel | null = null
   let sessionId: Uint8Array | null = null

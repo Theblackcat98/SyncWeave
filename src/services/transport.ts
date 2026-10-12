@@ -298,7 +298,11 @@ export class NoiseChannel {
 
   /** Async iterator of decrypted transport payloads. */
   async *receive(signal?: AbortSignal): AsyncGenerator<Uint8Array> {
-    while (!this.isClosed) {
+    // Do NOT check isClosed up front: the socket 'close' event can fire
+    // while frames are still buffered (e.g. a CANCEL arriving just before
+    // the sender's FIN). Drain via readMessage's null-on-EOF instead, so
+    // teardown frames are never dropped.
+    for (;;) {
       let ciphertext: Uint8Array | null
       try {
         ciphertext = await readMessage(this.reader, signal)
