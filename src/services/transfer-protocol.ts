@@ -53,6 +53,33 @@ import { receiveToFile, sanitizePeerBasename } from "./safe-receive-sink.js"
 const CHUNK_BYTES = 64 * 1024
 const APP_MAX_BODY = 16 * 1024 * 1024
 const APP_MAX_NAME_BYTES = 255
+/** Resource budgets (Nick's recorded decisions): enforced on BOTH endpoints.
+ * The sender checks before transmitting; the receiver re-checks the
+ * advertised metadata before authorizing, so a malicious sender cannot
+ * make the receiver accept an over-budget session. */
+export const BUDGET_MAX_FILES = 25
+export const BUDGET_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+export const BUDGET_MAX_SESSION_BYTES = 10 * 1024 * 1024 * 1024
+
+/** Fail closed unless the advertised file set fits every budget. */
+export function enforceBudgets(files: readonly ProtocolFile[], what: string): void {
+  if (files.length === 0 || files.length > BUDGET_MAX_FILES) {
+    throw new Error(`${what}: file count must be 1-${BUDGET_MAX_FILES}`)
+  }
+  let total = 0
+  for (const f of files) {
+    if (!Number.isSafeInteger(f.bytes) || f.bytes < 0) {
+      throw new Error(`${what}: invalid file size for ${f.name}`)
+    }
+    if (f.bytes > BUDGET_MAX_FILE_BYTES) {
+      throw new Error(`${what}: file too large: ${f.name}`)
+    }
+    total += f.bytes
+    if (total > BUDGET_MAX_SESSION_BYTES) {
+      throw new Error(`${what}: session total exceeds 10 GiB`)
+    }
+  }
+}
 
 export interface ProtocolFile {
   name: string
@@ -97,7 +124,7 @@ function signProof(identity: EphemeralIdentity, handshakeHash: Uint8Array): Iden
 function verifyProof(
   proof: IdentityProofBody,
   handshakeHash: Uint8Array,
-  expectedPeerId: string,
+  expectedPeerId?: string,
 ): string {
   let publicKey: Uint8Array
   try {
@@ -122,11 +149,17 @@ function verifyProof(
   if (!valid) {
     throw new Error("identity proof: signature does not bind to this session")
   }
-  // Re-derive the Peer ID from the verified key and compare the complete
-  // string with the out-of-band expected value.
+  // Re-derive the Peer ID from the verified key. If an out-of-band expected
+  // value was provided, compare the complete string exactly; otherwise the
+  // caller is responsible for presenting the verified ID to the user
+  // (trust-on-first-use via an explicit accept action).
   const derived = peerIdFromPublicKey(publicKey)
-  if (!verifyPeerId(expectedPeerId, derived) || !verifyPeerId(expectedPeerId, proof.peerId)) {
-    throw new Error("identity proof: Peer ID does not match the expected out-of-band identity")
+  if (expectedPeerId !== undefined) {
+    if (!verifyPeerId(expectedPeerId, derived) || !verifyPeerId(expectedPeerId, proof.peerId)) {
+      throw new Error("identity proof: Peer ID does not match the expected out-of-band identity")
+    }
+  } else if (!verifyPeerId(proof.peerId, derived)) {
+    throw new Error("identity proof: Peer ID does not match the proved key")
   }
   return derived
 }
@@ -137,6 +170,53 @@ function parseJsonBody(header: FrameHeader, body: Uint8Array, what: string): unk
     return JSON.parse(Buffer.from(body).toString("utf8"))
   } catch {
     throw new Error(`malformed ${what} body`)
+  }
+}
+
+/**
+ * Shape validation for incoming JSON protocol bodies. JSON.parse returns
+ * `unknown`; every field the protocol acts on is checked here so a
+ * malformed or hostile body fails closed instead of flowing into
+ * authorization, file I/O, or crypto as a blind `as` cast.
+ */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+export function validateProtocolFiles(files: unknown, what: string): asserts files is ProtocolFile[] {
+  if (!Array.isArray(files)) {
+    throw new Error(`malformed ${what}: files is not an array`)
+  }
+  for (const f of files) {
+    if (!isRecord(f)) {
+      throw new Error(`malformed ${what}: file entry is not an object`)
+    }
+    if (typeof f.name !== "string" || f.name.length === 0 || Buffer.byteLength(f.name, "utf8") > APP_MAX_NAME_BYTES) {
+      throw new Error(`malformed ${what}: bad file name`)
+    }
+    if (typeof f.bytes !== "number" || !Number.isSafeInteger(f.bytes) || f.bytes < 0) {
+      throw new Error(`malformed ${what}: bad file size for ${f.name}`)
+    }
+    if (typeof f.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(f.sha256)) {
+      throw new Error(`malformed ${what}: bad sha256 for ${f.name}`)
+    }
+  }
+}
+
+export function validateIdentityProofBody(body: unknown): asserts body is IdentityProofBody {
+  if (!isRecord(body)) {
+    throw new Error("malformed identity proof: not an object")
+  }
+  for (const k of ["peerId", "identityPublicKey", "identitySignature"] as const) {
+    if (typeof body[k] !== "string" || (body[k] as string).length === 0) {
+      throw new Error(`malformed identity proof: bad ${k}`)
+    }
+  }
+}
+
+export function validateSha256Body(body: unknown): asserts body is { sha256: string } {
+  if (!isRecord(body) || typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(body.sha256)) {
+    throw new Error("malformed file-end: bad sha256")
   }
 }
 
@@ -193,32 +273,34 @@ export interface SendOptions {
   port: number
   /** Local files to send. `sha256`/`bytes` are verified by reading the file. */
   files: Array<{ path: string; name: string }>
-  /** The receiver's complete Peer ID, verified out of band by the user. */
-  expectedPeerId: string
+  /**
+   * The receiver's complete Peer ID, verified out of band by the user.
+   * If omitted, the verified Peer ID from the session proof is used
+   * (trust-on-first-use; the UI should display it). If provided, it must
+   * match exactly.
+   */
+  expectedPeerId?: string
   /** Inject a pre-generated identity (tests). Generated fresh if omitted. */
   identity?: EphemeralIdentity
   signal?: AbortSignal
+  /** Progress callback for UI: (fileIndex, fileName, bytesSent, fileBytes). */
+  onProgress?: (fileIndex: number, fileName: string, bytesSent: number, fileBytes: number) => void
 }
 
 /** Sender side: dial, handshake, Gate B, Gate C, then stream files. */
 export async function sendFiles(options: SendOptions): Promise<void> {
-  const { host, port, expectedPeerId, signal } = options
-  if (options.files.length === 0 || options.files.length > 25) {
-    throw new Error("file count must be 1-25")
+  const { host, port, signal } = options
+  const expectedPeerId = options.expectedPeerId
+  if (options.files.length === 0 || options.files.length > BUDGET_MAX_FILES) {
+    throw new Error(`file count must be 1-${BUDGET_MAX_FILES}`)
   }
   // Hash and measure every file up front (bounded: 25 files).
   const files: Array<ProtocolFile & { path: string }> = []
   for (const f of options.files) {
     const { bytes, sha256 } = await sha256File(f.path)
-    if (bytes > 2 * 1024 * 1024 * 1024) {
-      throw new Error(`file too large: ${f.name}`)
-    }
     files.push({ path: f.path, name: f.name, bytes, sha256 })
   }
-  const total = files.reduce((n, f) => n + f.bytes, 0)
-  if (total > 10 * 1024 * 1024 * 1024) {
-    throw new Error("session total exceeds 10 GiB")
-  }
+  enforceBudgets(files, "send")
 
   const identity = options.identity ?? generateEphemeralIdentity()
   const sessions = new SessionManager()
@@ -229,8 +311,12 @@ export async function sendFiles(options: SendOptions): Promise<void> {
     const session = sessions.createSession("sender")
     const confirmation = transcriptConfirmation(hs.handshakeHash, session.id)
 
-    // Gate B, local side: the user provided the expected Peer ID out of band.
-    sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
+    // Gate B, local side: the user provided the expected Peer ID out of band,
+    // or (TOFU mode) their act of choosing this peer and sending is the
+    // confirmation, recorded after the peer's proof verifies below.
+    if (expectedPeerId !== undefined) {
+      sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
+    }
 
     // 1. SESSION_OPEN with our identity proof.
     await channel.send(
@@ -244,10 +330,15 @@ export async function sendFiles(options: SendOptions): Promise<void> {
     if (confirm.header.type !== FrameType.IdentityConfirm) {
       throw new Error("expected identity confirmation")
     }
-    const proof = parseJsonBody(confirm.header, confirm.body, "identity proof") as IdentityProofBody
-    const verifiedPeerId = verifyProof(proof, hs.handshakeHash, expectedPeerId)
+    const proofBody: unknown = parseJsonBody(confirm.header, confirm.body, "identity proof")
+    validateIdentityProofBody(proofBody)
+    const verifiedPeerId = verifyProof(proofBody, hs.handshakeHash, expectedPeerId)
     const verifiedIdentity = new TextEncoder().encode(verifiedPeerId)
     sessions.recordIdentityConfirmation(session.id, "remote", verifiedIdentity)
+    if (expectedPeerId === undefined) {
+      // TOFU mode: the user's send action confirms this verified identity.
+      sessions.recordIdentityConfirmation(session.id, "local", verifiedIdentity)
+    }
 
     // 3. Gate B complete: authorize and send the transfer request (metadata only).
     const authorized = files.map((f) => ({ name: f.name, bytes: f.bytes, sha256: f.sha256 }))
@@ -267,9 +358,10 @@ export async function sendFiles(options: SendOptions): Promise<void> {
     if (accept.header.type !== FrameType.TransferAccept) {
       throw new Error("expected transfer acceptance")
     }
-    const acceptedBody = parseJsonBody(accept.header, accept.body, "transfer acceptance") as {
-      files: ProtocolFile[]
-    }
+    const acceptedRaw: unknown = parseJsonBody(accept.header, accept.body, "transfer acceptance")
+    if (!isRecord(acceptedRaw)) throw new Error("malformed transfer acceptance: not an object")
+    validateProtocolFiles(acceptedRaw.files, "transfer acceptance")
+    const acceptedBody = acceptedRaw as { files: ProtocolFile[] }
     const accepted = sessions.acceptTransfer(auth, verifiedIdentity, acceptedBody.files)
     parser.transitionTo("sending")
 
@@ -280,6 +372,8 @@ export async function sendFiles(options: SendOptions): Promise<void> {
       if (!local) {
         throw new Error("accepted file not in local set")
       }
+      let sentBytes = 0
+      options.onProgress?.(fileIndex, local.name, 0, local.bytes)
       const fileId = createHash("sha256").update(auth.token).update(file.name).digest().subarray(0, 16)
       const headerExt = new Map([
         [ExtensionKey.SessionId, session.id],
@@ -295,6 +389,8 @@ export async function sendFiles(options: SendOptions): Promise<void> {
           [ExtensionKey.FileId, fileId],
         ])
         await channel.send(encodeFrame(FrameType.FileChunk, new Uint8Array(chunk as Buffer), chunkExt, APP_MAX_BODY))
+        sentBytes += (chunk as Buffer).length
+        options.onProgress?.(fileIndex, local.name, sentBytes, local.bytes)
       }
       const endExt = new Map([
         [ExtensionKey.SessionId, session.id],
@@ -318,14 +414,21 @@ export async function sendFiles(options: SendOptions): Promise<void> {
 export interface ReceiveOptions {
   channel: NoiseChannel
   handshakeHash: Uint8Array
-  /** The sender's complete Peer ID, verified out of band by the user. */
-  expectedPeerId: string
+  /**
+   * The sender's complete Peer ID, verified out of band by the user.
+   * If omitted, the verified Peer ID from the session proof is used and the
+   * consent UI is responsible for showing it to the user (trust-on-first-use
+   * via the accept action). If provided, it must match exactly.
+   */
+  expectedPeerId?: string
   destinationDirectory: string
   /** Called with the verified request; returns the exact subset to accept. */
   onTransferRequest: (request: { peerId: string; files: ProtocolFile[] }) => Promise<ProtocolFile[]>
   /** Inject a pre-generated identity (tests). Generated fresh if omitted. */
   identity?: EphemeralIdentity
   signal?: AbortSignal
+  /** Progress callback for UI: (fileIndex, fileName, bytesReceived, fileBytes). */
+  onProgress?: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => void
 }
 
 /** Receiver side: verify, Gate B, present request, Gate C, then receive. */
@@ -343,10 +446,16 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     if (open.header.type !== FrameType.SessionOpen) {
       throw new Error("expected session open")
     }
-    const senderProof = parseJsonBody(open.header, open.body, "identity proof") as IdentityProofBody
-    const verifiedSenderId = verifyProof(senderProof, handshakeHash, expectedPeerId)
+    const senderProofBody: unknown = parseJsonBody(open.header, open.body, "identity proof")
+    validateIdentityProofBody(senderProofBody)
+    const verifiedSenderId = verifyProof(senderProofBody, handshakeHash, options.expectedPeerId)
     const senderIdentity = new TextEncoder().encode(verifiedSenderId)
-    sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
+    // Gate B, local side: with an out-of-band expected ID it was provided up
+    // front; in TOFU mode the user's accept action in onTransferRequest is
+    // the local confirmation, recorded after they approve.
+    if (options.expectedPeerId !== undefined) {
+      sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(options.expectedPeerId))
+    }
     sessions.recordIdentityConfirmation(session.id, "remote", senderIdentity)
     parser.transitionTo("handshake")
 
@@ -361,14 +470,23 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     if (request.header.type !== FrameType.TransferRequest) {
       throw new Error("expected transfer request")
     }
-    const requestBody = parseJsonBody(request.header, request.body, "transfer request") as {
-      files: ProtocolFile[]
-    }
-    const auth = sessions.authorizeTransfer(session.id, requestBody.files)
+    const requestRaw: unknown = parseJsonBody(request.header, request.body, "transfer request")
+    if (!isRecord(requestRaw)) throw new Error("malformed transfer request: not an object")
+    validateProtocolFiles(requestRaw.files, "transfer request")
+    const requestBody = requestRaw as { files: ProtocolFile[] }
+    // Mirror the sender budgets on the receiver: a malicious sender must
+    // not be able to make us authorize an over-budget session.
+    enforceBudgets(requestBody.files, "receive")
     parser.transitionTo("request-review")
 
     // 4. Gate C: the user's explicit, separate acceptance of the exact set.
-    const accepted = await onTransferRequest({ peerId: senderProof.peerId, files: requestBody.files })
+    // In TOFU mode (no out-of-band expected ID), the user's accept action is
+    // also the local Gate B confirmation — recorded before authorizing.
+    const accepted = await onTransferRequest({ peerId: senderProofBody.peerId, files: requestBody.files })
+    if (options.expectedPeerId === undefined) {
+      sessions.recordIdentityConfirmation(session.id, "local", senderIdentity)
+    }
+    const auth = sessions.authorizeTransfer(session.id, requestBody.files)
     const acceptedTransfer = sessions.acceptTransfer(auth, senderIdentity, accepted)
     const requestId = request.header.extension.get(ExtensionKey.RequestId) ?? new Uint8Array(0)
     const acceptExt = new Map([
@@ -381,12 +499,15 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     parser.transitionTo("receiving")
 
     // 5. Receive each file into the safe sink with autorename on collision.
+    let fileIndex = 0
     for (const file of acceptedTransfer.acceptedFiles) {
       const header = await readFrame(parser, signal)
       if (header.header.type !== FrameType.FileHeader) {
         throw new Error("expected file header")
       }
-      const fileMeta = parseJsonBody(header.header, header.body, "file header") as ProtocolFile
+      const fileMetaRaw: unknown = parseJsonBody(header.header, header.body, "file header")
+      validateProtocolFiles([fileMetaRaw], "file header")
+      const fileMeta = fileMetaRaw as ProtocolFile
       if (fileMeta.sha256 !== file.sha256 || fileMeta.bytes !== file.bytes) {
         throw new Error("file header does not match the accepted file")
       }
@@ -394,10 +515,13 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
       const destinationName = await resolveDestination(destinationDirectory, file.name)
 
       async function* chunks(): AsyncGenerator<Uint8Array> {
+        let receivedBytes = 0
         for (;;) {
           const frame = await readFrame(parser, signal)
           if (frame.header.type === FrameType.FileEnd) {
-            const endBody = parseJsonBody(frame.header, frame.body, "file end") as { sha256: string }
+            const endRaw: unknown = parseJsonBody(frame.header, frame.body, "file end")
+            validateSha256Body(endRaw)
+            const endBody = endRaw
             if (endBody.sha256 !== file.sha256) {
               throw new Error("file end hash mismatch")
             }
@@ -410,6 +534,8 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
           if (!fileId || !chunkFileId || !equalBytes(fileId, chunkFileId)) {
             throw new Error("chunk for wrong file")
           }
+          receivedBytes += frame.body.length
+          options.onProgress?.(fileIndex, file.name, receivedBytes, file.bytes)
           yield frame.body
         }
       }
@@ -424,6 +550,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
         signal,
       })
       received.push({ name: result.name, bytes: result.bytes, sha256: result.sha256, path: result.path })
+      fileIndex++
     }
     return received
   } finally {

@@ -1,6 +1,6 @@
 # SyncWeave
 
-A keyboard-first, animated terminal UI for reviewing and staging file transfers. The current **Phase 1 build is a deterministic simulation**: it does not access real files, discover peers on a network, send bytes, synchronize directories, persist transfers to disk, or establish a pairing/trust relationship. The receiver-consent UX is informed by LocalSend's documented v2 flow, but no network protocol or transport is implemented. The proposed Phase 2 scope in [phase2.md](phase2.md) is direct local-LAN send/receive with per-transfer consent, safe writes, integrity, and recovery; it is a specification only, not implemented.
+A keyboard-first, animated terminal UI for reviewing and staging file transfers — a TUI take on LocalSend for the local network. The app runs in two modes: **mock** (the original deterministic simulation: no real files, no network) and **real** (actual transfers). The real mode implements the Phase 2 network stack: `Noise_XX_25519_AESGCM_SHA256` over TCP (verified against the official Noise test vector), UDP-multicast peer discovery with manual `IP:port` fallback, session-ephemeral Ed25519 Peer IDs verified before any metadata flows, per-transfer receiver consent, 64 KiB chunked streaming, SHA-256 integrity, automatic rename on collision, and restart-from-zero recovery. See [docs/decisions.md](docs/decisions.md) for the recorded decisions and [phase2.md](phase2.md) for the specification.
 
 ## Run
 
