@@ -15,17 +15,17 @@ silently deviate from this record; changes need a new recorded decision.
 ## 2. Transport and identity
 
 - **Noise_XX_25519_AESGCM_SHA256 over raw TCP**, implemented on
-  `node:crypto` (no libp2p dependency). Rationale: the accepted profile is
-  manual-direct with no discovery, so a full libp2p stack adds weight and
-  failure modes without benefit. AES-GCM (not ChaChaPoly) because Bun's
-  `node:crypto` provides hardware-backed AES-256-GCM but no ChaCha20-Poly1305;
-  a pure-JS ChaCha20 would be slower and add unaudited code. The
-  implementation is verified against the official Noise test vector for
-  `Noise_XX_25519_AESGCM_SHA256` (snow's vector set), which is stronger
-  evidence than a dependency claim.
+  `node:crypto` (no libp2p dependency). Rationale: AES-GCM (not ChaChaPoly)
+  because Bun's `node:crypto` provides hardware-backed AES-256-GCM but no
+  ChaCha20-Poly1305; a pure-JS ChaCha20 would be slower and add unaudited
+  code. Discovery (below) is a separate UDP-multicast mechanism and does not
+  require a full libp2p stack. The implementation is verified against the
+  official Noise test vector for `Noise_XX_25519_AESGCM_SHA256` (snow's
+  vector set), which is stronger evidence than a dependency claim.
   (For reference: LocalSend v2 transfers use HTTPS/TLS over TCP with a
-  REST-ish prepare/upload API; SyncWeave uses Noise per the accepted profile
-  instead of TLS.)
+  REST-ish prepare/upload API and UDP multicast for discovery; SyncWeave
+  uses Noise instead of TLS for transfers, with its own UDP-multicast
+  discovery.)
 - **Peer identity:** fresh ephemeral X25519 static key per session for the
   Noise handshake; fresh ephemeral Ed25519 identity key per session, exchanged
   and verified out of band as a libp2p-style Peer ID (protobuf-encoded
@@ -33,10 +33,21 @@ silently deviate from this record; changes need a new recorded decision.
   the complete expected Peer ID with the verified identity on the exact
   authenticated connection before any metadata flows. No identity keys or IDs
   are persisted; a mismatch aborts the session.
-- **Bootstrap:** user-entered numeric `IP:port` only. No mDNS, no DNS
-  resolution, no discovery fallback. Listener binds to user-selected local
+- **Bootstrap:** automatic peer discovery via UDP multicast (LocalSend-style),
+  plus manual numeric `IP:port` entry as fallback. Discovered peers are shown
+  for the user to pick; discovery never substitutes for identity confirmation.
+  The privacy constraint from the spec applies: before both endpoint users
+  independently confirm the matching session-bound identity, only the minimum
+  LAN discovery fields strictly needed to locate and open a candidate session
+  may be visible, and any identifier must be random, session-scoped, and
+  unlinkable across sessions. The listener binds to user-selected local
   interface(s), is explicitly started/stopped by the receiver, and never runs
   hidden.
+  - *Amendment 2026-10-11 (Nick):* the original record said "user-entered
+    numeric `IP:port` only, no discovery." That was wrong: SyncWeave is a TUI
+    LocalSend and auto discovery is wanted. This amendment supersedes the
+    no-discovery profile language in `phase2.md` (§bootstrap, acceptance
+    gates); manual entry stays as fallback, not the only path.
 - **Default port:** 24816 (unassigned; documented in-app). Interface binding,
   firewall guidance, and behavior under client isolation / VPNs / address
   changes are documented in `docs/networking.md` (to be written with the
