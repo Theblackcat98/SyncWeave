@@ -291,7 +291,11 @@ test("peer-id: generated identities are unique and verify exactly", async () => 
   expect(a.peerId.startsWith("z")).toBe(true)
   expect(verifyPeerId(a.peerId, a.peerId)).toBe(true)
   expect(verifyPeerId(a.peerId, b.peerId)).toBe(false)
-  expect(verifyPeerId(a.peerId, a.peerId.slice(0, -1) + "x")).toBe(false)
+  // Flip the last character to a *different* base58 char (the old test used
+  // a fixed "x", which is a no-op when the ID already ends in "x" — flaky).
+  const last = a.peerId[a.peerId.length - 1]
+  const flipped = last === "1" ? "2" : "1"
+  expect(verifyPeerId(a.peerId, a.peerId.slice(0, -1) + flipped)).toBe(false)
   expect(peerIdFromPublicKey(a.publicKey)).toBe(a.peerId)
   await mkdir(tmpdir(), { recursive: true })
 })

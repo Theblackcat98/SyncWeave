@@ -482,7 +482,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     // 4. Gate C: the user's explicit, separate acceptance of the exact set.
     // In TOFU mode (no out-of-band expected ID), the user's accept action is
     // also the local Gate B confirmation — recorded before authorizing.
-    const accepted = await onTransferRequest({ peerId: senderProofBody.peerId, files: requestBody.files })
+    const accepted = await onTransferRequest({ peerId: verifiedSenderId, files: requestBody.files })
     if (options.expectedPeerId === undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", senderIdentity)
     }

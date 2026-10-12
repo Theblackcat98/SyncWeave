@@ -1,5 +1,8 @@
-import { createServer, connect, type Server, type Socket } from "node:net"
+import { createServer, connect, isIP, type Server, type Socket } from "node:net"
 import { NoiseHandshake, x25519Generate, type CipherState } from "./noise.js"
+
+/** Handshake budget (recorded decision): a stalled peer gets 60s, then the socket is destroyed. */
+const HANDSHAKE_TIMEOUT_MS = 60_000
 
 /**
  * TCP transport for the Phase 2 direct-transfer profile.
@@ -273,6 +276,10 @@ export interface HandshakeResult {
 }
 
 async function runHandshake(socket: Socket, initiator: boolean, signal?: AbortSignal): Promise<HandshakeResult> {
+  // Enforce the 60s handshake budget (recorded decision): a peer that
+  // connects and sends nothing must not wedge the accept loop forever.
+  const budget = AbortSignal.timeout(HANDSHAKE_TIMEOUT_MS)
+  const hsSignal = signal ? AbortSignal.any([signal, budget]) : budget
   // The reader is created once per socket and handed to the channel: bytes
   // that arrive pipelined after the handshake must not be discarded.
   const reader = new SocketReader(socket)
@@ -283,16 +290,16 @@ async function runHandshake(socket: Socket, initiator: boolean, signal?: AbortSi
   const empty = new Uint8Array(0)
   if (initiator) {
     await writeMessage(socket, handshake.writeMessage(empty))
-    const reply = await readMessage(reader, signal)
+    const reply = await readMessage(reader, hsSignal)
     if (reply === null) throw new Error("Noise handshake: peer closed during handshake")
     handshake.readMessage(reply)
     await writeMessage(socket, handshake.writeMessage(empty))
   } else {
-    const first = await readMessage(reader, signal)
+    const first = await readMessage(reader, hsSignal)
     if (first === null) throw new Error("Noise handshake: peer closed during handshake")
     handshake.readMessage(first)
     await writeMessage(socket, handshake.writeMessage(empty))
-    const last = await readMessage(reader, signal)
+    const last = await readMessage(reader, hsSignal)
     if (last === null) throw new Error("Noise handshake: peer closed during handshake")
     handshake.readMessage(last)
   }
@@ -316,7 +323,10 @@ async function runHandshake(socket: Socket, initiator: boolean, signal?: AbortSi
 /** Dial a numeric IP:port and complete the Noise_XX handshake as initiator. */
 export function dialNoise(host: string, port: number, signal?: AbortSignal): Promise<HandshakeResult> {
   return new Promise((resolve, reject) => {
-    if (!/^[0-9a-fA-F:.]+$/.test(host)) {
+    // Numeric IPs only: no DNS resolution (avoids leaking the dial target
+    // to the configured resolver). isIP() is strict; the old hex/dot/colon
+    // regex accepted strings like "cafe" that node:net would then resolve.
+    if (isIP(host) === 0) {
       reject(new Error("Only numeric IP endpoints are allowed (no DNS, no discovery)"))
       return
     }

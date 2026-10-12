@@ -40,9 +40,14 @@ silently deviate from this record; changes need a new recorded decision.
   independently confirm the matching session-bound identity, only the minimum
   LAN discovery fields strictly needed to locate and open a candidate session
   may be visible, and any identifier must be random, session-scoped, and
-  unlinkable across sessions. The listener binds to user-selected local
-  interface(s), is explicitly started/stopped by the receiver, and never runs
-  hidden.
+  unlinkable across sessions. The listener binds `0.0.0.0` (all local
+  interfaces; no per-interface selection is implemented) and starts
+  automatically with `--real`; it stops when the process exits. It never runs
+  hidden: the TUI shows listening state in the header.
+  - *Correction 2026-10-11 (review):* the earlier text said "user-selected
+    local interface(s), explicitly started/stopped by the receiver" — that
+    describes an aspiration, not the implementation. Recorded here as
+    unimplemented; see `docs/networking.md`.
   - *Amendment 2026-10-11 (Nick):* the original record said "user-entered
     numeric `IP:port` only, no discovery." That was wrong: SyncWeave is a TUI
     LocalSend and auto discovery is wanted. This amendment supersedes the
@@ -61,7 +66,7 @@ silently deviate from this record; changes need a new recorded decision.
 | Max session total | 10 GiB |
 | Max files per session | 25 |
 | Handshake/confirmation timeout | 60 s |
-| Per-frame body cap (app framing) | 16 MiB chunks (files stream in chunks; whole files are never buffered) |
+| Per-frame body cap (app framing) | 64 KiB chunks (files stream in chunks; whole files are never buffered) |
 | Transfer retries | 3, bounded and user-visible |
 | Concurrent sessions per endpoint | 1 (one active transfer session at a time) |
 

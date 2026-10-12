@@ -40,6 +40,7 @@ test("real mode mounts, shows manual peer, and starts the receive loop", async (
     alias: "smoke",
     tcpPort: (listener as unknown as { port: number }).port ?? 0,
     receiveDirectory: "/tmp",
+    aborter: new AbortController(),
   }
   const setup = await createTestRenderer({ width: 120, height: 36 })
   const app = createSyncWeaveApp(setup.renderer, {

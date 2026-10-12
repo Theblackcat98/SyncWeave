@@ -26,6 +26,8 @@ export interface RealTransport {
   tcpPort: number
   /** Directory where received files are written. */
   receiveDirectory: string
+  /** Aborts the listener accept loop; aborted on app dispose. */
+  aborter: AbortController
 }
 
 export interface AppDependencies {
@@ -66,6 +68,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   // sha256 lookup for the pending real consent (consent screen has no sha256 field).
   let pendingSha256: Map<string, string> = new Map()
   const state = createInitialAppState(filesystem.paths, dependencies.reducedMotion)
+  if (mode === "real") {
+    state.status = "Ready · listening for peers on the LAN"
+  }
   const clock = new AnimationClock()
   let paused = false
   let disposed = false
@@ -334,7 +339,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function openCurrentDirectory(): void {
     const entry = currentEntries()[state.cursors[state.activePane]]
     if (!entry || entry.kind !== "directory") {
-      state.status = entry ? `${entry.name} is a file · press d to inspect its mock diff` : "No item to open"
+      state.status = entry ? `${entry.name} is a file · press d to inspect its ${mode === "real" ? "diff" : "mock diff"}` : "No item to open"
       render()
       return
     }
@@ -496,9 +501,30 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         }
         beginOutgoingConsent()
         return
-      case "incoming": createIncomingRequest(); return
-      case "peer": state.identityStep = 0; setScreen("peer"); return
-      case "favorites": openFavorites(); return
+      case "incoming":
+        // Mock-only: real incoming transfers arrive from the network.
+        if (mode === "real") {
+          state.status = "Incoming transfers arrive from the network · listening…"
+          render()
+          return
+        }
+        createIncomingRequest(); return
+      case "peer":
+        // Mock-only screen; real peers live in the Receiver pane.
+        if (mode === "real") {
+          state.status = "Peer list is in the Receiver pane · Tab to switch, ↑/↓ to choose"
+          render()
+          return
+        }
+        state.identityStep = 0; setScreen("peer"); return
+      case "favorites":
+        // Mock-only feature.
+        if (mode === "real") {
+          state.status = "Favorites are not available in real mode"
+          render()
+          return
+        }
+        openFavorites(); return
       case "queue": setScreen("queue"); return
       case "help": setScreen("help"); return
       case "toggle-current": toggleCurrentEntry(); return
@@ -533,7 +559,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       case "diff-stage": {
         const entry = currentEntries()[state.cursors[state.activePane]]
         if (entry?.kind === "file") state.staged[state.activePane].add(entry.id)
-        state.status = entry ? `Staged ${entry.name} from the mock diff` : "No file to stage"
+        state.status = entry ? `Staged ${entry.name} from the ${mode === "real" ? "diff" : "mock diff"}` : "No file to stage"
         setScreen("workspace"); return
       }
       case "transfer-cancel": cancelTransfer(); return
@@ -608,6 +634,15 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if (name === "space") { command("toggle-consent"); return }
     if (name === "r") { command("rename-consent"); return }
     if (name === "d") { command("cycle-destination"); return }
+    // In real mode a parked onTransferRequest promise is waiting on the
+    // consent bridge — route through command() so it resolves. Calling the
+    // mock accept/decline directly would orphan the promise and wedge the
+    // receive loop forever.
+    if (mode === "real" && realConsentResolver) {
+      if (name === "a") { command("consent-all"); return }
+      if (name === "return" || name === "enter") { command("consent-accept"); return }
+      if (name === "x" || name === "escape") { command("consent-decline"); return }
+    }
     if (name === "a") { acceptConsent(true); return }
     if (name === "return" || name === "enter") { acceptConsent(false); return }
     if (name === "x") { declineConsent(); return }
@@ -634,8 +669,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     switch (state.screen) {
       case "workspace": handleWorkspaceKey(key); return
       case "send-review":
-        if (name === "return" || name === "enter") beginOutgoingConsent()
-        else if (name === "q") { state.identityStep = 0; setScreen("peer") }
+        // Route through command() so real mode reaches beginRealSend().
+        // Calling beginOutgoingConsent() directly would run the mock flow.
+        if (name === "return" || name === "enter") { command("send-to-consent"); return }
+        else if (name === "q") {
+          if (mode === "real") {
+            state.status = "Peer list is in the Receiver pane · Tab to switch, ↑/↓ to choose"
+            render()
+            return
+          }
+          state.identityStep = 0; setScreen("peer")
+        }
         else if (name === "escape") setScreen("workspace")
         return
       case "consent": handleConsentKey(key); return
@@ -685,9 +729,15 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         fingerprint: d.peerId,
         online: true,
       }))
-      // Keep manually added peers (id starts with "manual:").
-      const manual = peers.filter((p) => p.id.startsWith("manual:"))
-      peers = [...manual, ...mapped]
+      // listPeers() already includes manual peers (they live in the same
+      // discovery map), so map the full list and dedupe by id — never
+      // re-append the previous array or entries duplicate every tick.
+      const seen = new Set<string>()
+      peers = mapped.filter((p) => {
+        if (seen.has(p.id)) return false
+        seen.add(p.id)
+        return true
+      })
       if (state.peerIndex >= peers.length) state.peerIndex = Math.max(0, peers.length - 1)
     }
     const peerTimer = setInterval(() => {
@@ -706,14 +756,24 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     // consent screen, and resolve it when the user accepts/declines there.
     const pendingConsent = (request: { peerId: string; files: Array<{ name: string; bytes: number; sha256: string }> }) => {
       return new Promise<Array<{ name: string; bytes: number; sha256: string }>>((resolve) => {
+        // If a previous consent is still parked, auto-decline it instead of
+        // orphaning its promise (and its channel) forever.
+        if (realConsentResolver) {
+          const stale = realConsentResolver
+          realConsentResolver = null
+          stale([])
+        }
         realConsentResolver = resolve
         // Keep sha256 by file id: the consent screen shape has no sha256 field.
         pendingSha256 = new Map(request.files.map((f) => [f.sha256, f.sha256]))
+        // Show the ACTUAL sender, not the currently selected peer — the user
+        // must know who they are consenting to.
+        const sender = peers.find((p) => p.id === request.peerId || p.fingerprint === request.peerId)
         // Reuse the consent screen shape: files with accepted flags.
         state.request = {
           id: `incoming-${Date.now()}`,
           mode: "incoming",
-          peer: peer() ?? { id: request.peerId, name: request.peerId.slice(0, 12), host: "", port: 0, fingerprint: request.peerId, online: true },
+          peer: sender ?? { id: request.peerId, name: request.peerId.slice(0, 12), host: "", port: 0, fingerprint: request.peerId, online: true },
           files: request.files.map((f) => ({ id: f.sha256, name: f.name, bytes: f.bytes, accepted: true, renamed: false })),
           createdAt: Date.now(),
         }
@@ -773,7 +833,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
     const fileList = files.map((f) => ({ path: f.id, name: f.name }))
     state.status = `Connecting to ${destination.name} (${destination.host}:${destination.port})…`
-    setScreen("transfer")
+    // Stay on the workspace screen: progress flows through the status line.
+    // (The transfer screen is mock-driven and would show "No transfer is active.")
+    render()
     try {
       await sendFiles({
         host: destination.host,
@@ -790,12 +852,12 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         },
       })
       state.status = `Sent ${fileList.length} file(s) to ${destination.name}`
-      // Clear staged after successful send.
-      state.staged.local.clear()
+      // Clear staged after successful send (active pane, matching stagedEntries).
+      state.staged[state.activePane].clear()
     } catch (error) {
       state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
     }
-    setScreen("workspace")
+    render()
   }
 
   function onBlur(): void {
@@ -825,6 +887,15 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function dispose(): void {
     if (disposed) return
     disposed = true
+    // Break the real-mode receive loop: aborting the signal unparks the
+    // accept() generator so the for-await loop can exit.
+    if (mode === "real" && dependencies.real) {
+      try {
+        dependencies.real.aborter.abort()
+      } catch {
+        // Best effort; the process is exiting anyway.
+      }
+    }
     clock.dispose()
     renderer.keyInput.off("keypress", handleKey)
     renderer.off(CliRenderEvents.RESIZE, render)

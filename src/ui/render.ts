@@ -290,7 +290,9 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
   if (!compact) {
     const legend = narrow
       ? `  ${icons.synced} sync  ${icons.added} add  ${icons.modified} edit  ${icons.deleted} del`
-      : `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted  ·  0 network connections`
+      : data.mode === "real"
+        ? `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted`
+        : `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted  ·  0 network connections`
     activity.add(label(renderer, "activity-legend", truncate(legend, Math.max(12, width - 6)), theme.color.dim))
   }
   parent.add(activity)
@@ -502,16 +504,22 @@ function renderHelp(parent: BoxRenderable, data: RenderData, width: number): voi
     const prefix = `${key?.padEnd(20)} `
     card.add(label(renderer, `help-row-${index}`, `${prefix}${truncate(description ?? "", Math.max(10, width - prefix.length - 6))}`, index % 2 ? theme.color.text : theme.color.focus))
   })
-  card.add(label(renderer, "help-note", "Phase 1 is a deterministic simulation: no real files, networking, synchronization, pairing, or disk persistence.", theme.color.warning))
+  card.add(label(renderer, "help-note", data.mode === "real"
+    ? "Real mode: live files, Noise-encrypted transfers, UDP-multicast discovery."
+    : "Phase 1 is a deterministic simulation: no real files, networking, synchronization, pairing, or disk persistence.", theme.color.warning))
   card.add(actionButton(renderer, "help-back", "Back · Esc", "workspace", actions.command, { fg: theme.color.muted }))
   parent.add(card)
 }
 
 function renderQueue(parent: BoxRenderable, data: RenderData, width: number): void {
-  const { renderer, state, queue, actions } = data
+  const { renderer, state, queue, actions, mode } = data
   const card = pageCard(renderer, "transfer-queue", "Transfer queue · this session", theme.color.remote, state.revealFrame)
-  card.add(label(renderer, "queue-disclaimer", "In-memory mock history only · cleared when this process exits.", theme.color.warning))
-  if (!queue.length) card.add(label(renderer, "queue-empty", "No transfer requests yet. Send staged files or press I to simulate an incoming request.", theme.color.muted))
+  card.add(label(renderer, "queue-disclaimer", mode === "real"
+    ? "In-memory history only · cleared when this process exits."
+    : "In-memory mock history only · cleared when this process exits.", theme.color.warning))
+  if (!queue.length) card.add(label(renderer, "queue-empty", mode === "real"
+    ? "No transfer requests yet. Stage files and press S to send; incoming transfers appear here for review."
+    : "No transfer requests yet. Send staged files or press I to simulate an incoming request.", theme.color.muted))
   queue.slice(0, 12).forEach((record, index) => {
     const direction = record.direction === "incoming" ? "IN" : "OUT"
     const line = `${String(index + 1).padStart(2, "0")} ${direction}  ${statusLabel(record.status).padEnd(12)} ${record.peerName}  ${record.acceptedFiles.length}/${record.files.length} files`
@@ -536,14 +544,25 @@ function renderFooter(data: RenderData, width: number, compact: boolean): BoxRen
     marginTop: compact ? 0 : 1,
   })
   let hint: string
+  const realMode = data.mode === "real"
   if (compact) {
-    hint = state.screen === "workspace" ? "↑↓ move · Tab pane · Space stage · s send · i receive · ? help" : "Enter select · Esc back · Ctrl+C quit"
+    hint = state.screen === "workspace"
+      ? realMode
+        ? "↑↓ move · Tab pane · Space stage · s send · ? help"
+        : "↑↓ move · Tab pane · Space stage · s send · i receive · ? help"
+      : "Enter select · Esc back · Ctrl+C quit"
   } else {
     const hints: Record<Screen, string> = {
-      workspace: "↑↓ Navigate  ·  Tab Pane  ·  Space Stage  ·  s Send  ·  i Receive  ·  d Diff  ·  q Peers  ·  ? Help",
-      "send-review": "Enter Continue to consent  ·  q Choose peer  ·  Esc Back",
+      workspace: realMode
+        ? "↑↓ Navigate  ·  Tab Pane  ·  Space Stage  ·  s Send  ·  d Diff  ·  ? Help"
+        : "↑↓ Navigate  ·  Tab Pane  ·  Space Stage  ·  s Send  ·  i Receive  ·  d Diff  ·  q Peers  ·  ? Help",
+      "send-review": realMode
+        ? "Enter Send to peer  ·  Esc Back"
+        : "Enter Continue to consent  ·  q Choose peer  ·  Esc Back",
       consent: "↑↓ Focus  ·  Space Include/skip  ·  r Rename  ·  d Destination  ·  a Accept all  ·  Enter Accept selected  ·  x Decline",
-      transfer: "Esc Cancel  ·  e Simulate failure  ·  r Retry  ·  Enter Return",
+      transfer: realMode
+        ? "Esc Back"
+        : "Esc Cancel  ·  e Simulate failure  ·  r Retry  ·  Enter Return",
       peer: "←→ Browse  ·  v Compare  ·  e Simulate timeout  ·  r Retry preview  ·  f Favorite  ·  p List Favorites  ·  Esc Back",
       favorites: "↑↓ Select  ·  Enter View  ·  f Remove Favorite  ·  Esc Back",
       diff: "Tab Next hunk  ·  Enter Stage file  ·  Esc Back",

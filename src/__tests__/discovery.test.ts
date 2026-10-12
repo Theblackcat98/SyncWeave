@@ -178,7 +178,9 @@ describe("DiscoveryService peer tracking (via handleDatagram seam)", () => {
     const peers = svc.listPeers()
     expect(peers).toHaveLength(2)
     expect(peers.find((p) => p.peerId === PEER_B)?.alias).toBe("renamed")
-    expect(emissions).toBe(2) // one per new peer, none for the update
+    // One emission per new peer, plus one when an existing peer's
+    // address/alias changes (surfaces spoofed re-announcements).
+    expect(emissions).toBe(3)
   })
 
   test("ignores malformed datagrams", () => {
@@ -186,6 +188,36 @@ describe("DiscoveryService peer tracking (via handleDatagram seam)", () => {
     svc.handleDatagram(enc.encode("{nope"), "192.168.1.20")
     svc.handleDatagram(validDatagram({ v: 2 }), "192.168.1.20")
     expect(svc.listPeers()).toEqual([])
+  })
+
+  test("rejects announcements claiming the reserved manual: namespace", () => {
+    const svc = withSelf(new DiscoveryService())
+    // A network announcement must not hijack the local manual-peer
+    // namespace (never expires, TOFU on send).
+    expect(parseAnnouncement(validDatagram({ peerId: "manual:1.2.3.4:24816" }))).toBeNull()
+    svc.handleDatagram(validDatagram({ peerId: "manual:1.2.3.4:24816" }), "192.168.1.99")
+    expect(svc.listPeers()).toEqual([])
+  })
+
+  test("strips control characters from aliases (terminal escape injection)", () => {
+    const parsed = parseAnnouncement(validDatagram({ alias: "evil\x1b]0;pwned\x07\n" }))
+    expect(parsed).not.toBeNull()
+    expect(parsed!.alias).toBe("evil]0;pwned")
+    expect(/[\u0000-\u001f\u007f-\u009f]/.test(parsed!.alias)).toBe(false)
+  })
+
+  test("alias of only control characters is rejected", () => {
+    expect(parseAnnouncement(validDatagram({ alias: "\x1b\x07" }))).toBeNull()
+  })
+
+  test("addManualPeer validates its fields", () => {
+    const svc = withSelf(new DiscoveryService())
+    const good: DiscoveredPeer = { peerId: "manual:1.2.3.4:24816", alias: "1.2.3.4:24816", address: "1.2.3.4", tcpPort: 24816, lastSeen: Date.now() }
+    svc.addManualPeer(good)
+    expect(svc.listPeers()).toHaveLength(1)
+    expect(() => svc.addManualPeer({ ...good, peerId: "" })).toThrow()
+    expect(() => svc.addManualPeer({ ...good, tcpPort: 99999 })).toThrow()
+    expect(() => svc.addManualPeer({ ...good, alias: "" })).toThrow()
   })
 
   test("expires peers after 15s of silence", () => {

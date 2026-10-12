@@ -31,6 +31,8 @@ export const PEER_EXPIRY_MS = 15000
 const MAX_ANNOUNCE_BYTES = 512
 /** Alias length bounds (characters). */
 const MAX_ALIAS_CHARS = 64
+/** Upper bound on tracked peers; excess non-manual entries are evicted oldest-first. */
+const MAX_DISCOVERED_PEERS = 256
 
 export interface Announcement {
   v: 1
@@ -103,6 +105,12 @@ export function parseAnnouncement(data: Uint8Array): Announcement | null {
   if (typeof alias !== "string" || alias.length === 0 || alias.length > MAX_ALIAS_CHARS) {
     return null
   }
+  // Aliases are rendered in the TUI: strip control characters to block
+  // terminal escape-sequence injection via spoofed announcements.
+  const cleanAlias = alias.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+  if (cleanAlias.length === 0) {
+    return null
+  }
   const peerId = parsed["peerId"]
   // Ephemeral Peer IDs are base58btc ("z"-prefixed) encodings of a 36-byte
   // protobuf key: well under 128 chars. Bound the length without
@@ -110,11 +118,16 @@ export function parseAnnouncement(data: Uint8Array): Announcement | null {
   if (typeof peerId !== "string" || peerId.length === 0 || peerId.length > 128) {
     return null
   }
+  // "manual:" is a reserved local namespace (never expires, TOFU on send).
+  // A network announcement must not be able to claim it.
+  if (peerId.startsWith("manual:")) {
+    return null
+  }
   const tcpPort = parsed["tcpPort"]
   if (typeof tcpPort !== "number" || !Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535) {
     return null
   }
-  return { v: 1, alias, peerId, tcpPort }
+  return { v: 1, alias: cleanAlias, peerId, tcpPort }
 }
 
 function validateAlias(alias: unknown): string {
@@ -259,6 +272,19 @@ export class DiscoveryService {
    * unknown until a transfer verifies it (TOFU on send).
    */
   addManualPeer(peer: DiscoveredPeer): void {
+    // Validate at the trust boundary: callers build these from CLI input.
+    if (typeof peer.peerId !== "string" || peer.peerId.length === 0 || peer.peerId.length > 128) {
+      throw new Error("manual peer: peerId must be 1-128 characters")
+    }
+    if (typeof peer.alias !== "string" || peer.alias.length === 0 || peer.alias.length > MAX_ALIAS_CHARS) {
+      throw new Error("manual peer: alias must be 1-64 characters")
+    }
+    if (!Number.isInteger(peer.tcpPort) || peer.tcpPort < 1 || peer.tcpPort > 65535) {
+      throw new Error("manual peer: tcpPort must be an integer 1-65535")
+    }
+    if (typeof peer.address !== "string" || peer.address.length === 0) {
+      throw new Error("manual peer: address must be a non-empty string")
+    }
     this.peers.set(peer.peerId, peer)
     this.events.onPeersChanged?.(this.listPeers())
   }
@@ -276,7 +302,27 @@ export class DiscoveryService {
     if (announcement.peerId === this.ownPeerId) {
       return
     }
-    const existed = this.peers.has(announcement.peerId)
+    const existing = this.peers.get(announcement.peerId)
+    // Never let a network announcement overwrite a manual entry (the
+    // "manual:" namespace is reserved; parseAnnouncement already rejects
+    // such announcements, this is defense in depth).
+    if (existing && existing.peerId.startsWith("manual:")) {
+      return
+    }
+    // Cap the map against LAN flooding: evict the least-recently-seen
+    // non-manual entry when full.
+    if (!existing && this.peers.size >= MAX_DISCOVERED_PEERS) {
+      let oldestId: string | null = null
+      let oldestSeen = Infinity
+      for (const [id, p] of this.peers) {
+        if (id.startsWith("manual:")) continue
+        if (p.lastSeen < oldestSeen) {
+          oldestSeen = p.lastSeen
+          oldestId = id
+        }
+      }
+      if (oldestId) this.peers.delete(oldestId)
+    }
     this.peers.set(announcement.peerId, {
       peerId: announcement.peerId,
       alias: announcement.alias,
@@ -284,7 +330,13 @@ export class DiscoveryService {
       tcpPort: announcement.tcpPort,
       lastSeen: Date.now(),
     })
-    if (!existed) {
+    // Surface address/alias changes: a spoofed re-announcement of a known
+    // peerId silently redirecting sends is worth the UI noticing.
+    const changed = !existing ||
+      existing.address !== address ||
+      existing.tcpPort !== announcement.tcpPort ||
+      existing.alias !== announcement.alias
+    if (changed) {
       this.events.onPeersChanged?.(this.listPeers())
     }
   }

@@ -23,7 +23,45 @@ Reduce decorative motion while keeping transfer simulation usable:
 SYNCWEAVE_REDUCED_MOTION=1 bun run start
 ```
 
+## Real mode
+
+Real transfers run with `--real`. Two machines on the same LAN discover each
+other automatically over UDP multicast:
+
+```sh
+# machine A
+bun src/main.ts --real --alias laptop1
+# machine B
+bun src/main.ts --real --alias laptop2
+```
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--real` | off | Real mode: live identity, TCP listener, discovery, real filesystem. |
+| `--alias <name>` | `$USER` | Display name announced to peers. |
+| `--port <n>` | 24816 | TCP port for the Noise listener. |
+| `--peer <host:port>` | — | Manual peer (repeatable). Fallback when multicast discovery is unavailable; IPv6 as `--peer [::1]:24816`. |
+
+Two instances on the **same machine** need distinct ports, pointed at each
+other:
+
+```sh
+bun src/main.ts --real --alias laptop1 --port 24816 --peer 127.0.0.1:24818
+bun src/main.ts --real --alias laptop2 --port 24818 --peer 127.0.0.1:24816
+```
+
+Workflow: browse your real files, `Space` to stage, `Tab` to the Receiver
+pane, `↑/↓` to pick a peer, `Tab` back, `s` then `Enter` to send. The
+receiver gets a consent screen — keyboard `a` accepts all, `Enter` accepts
+the selection, `x` declines. Accepted files land in `~/Downloads` with
+automatic rename on collision. Network details, firewall notes, and what is
+still unverified live in [docs/networking.md](docs/networking.md).
+
 ## Workflow
+
+(mock mode)
 
 - Browse either mock workspace with **↑/↓**; use **Tab**, **1**, or **2** to change panes. Press **Enter** on a directory to open it and **Backspace** to go up. The **Stage** toolbar action works with a mouse or touch terminal as well as **Space**.
 - Press **Space** to stage a file, **a** to stage all files in the active folder, or **Shift+A** to clear that folder's staging. Use **d** to inspect the mock diff.

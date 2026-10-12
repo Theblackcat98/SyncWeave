@@ -100,6 +100,9 @@ export interface FrameParserOptions {
   maxExtensionBytes?: number
   /** Header read timeout in ms (default 15_000). */
   headerTimeoutMs?: number
+  /** Body read timeout in ms (default 60_000): a sender that stalls mid-body
+   *  must not hang the receiver forever. */
+  bodyTimeoutMs?: number
 }
 
 export interface ParserCounters {
@@ -404,8 +407,12 @@ export class FrameParser {
     }
     const out = new Uint8Array(header.bodyLength)
     let offset = 0
+    // Bound the whole body read: a sender dribbling bytes forever must not
+    // hang the receiver. (Header reads already have their own timeout.)
+    const bodyTimeout = AbortSignal.timeout(this.options.bodyTimeoutMs ?? 60_000)
+    const bodySignal = signal ? AbortSignal.any([signal, bodyTimeout]) : bodyTimeout
     while (offset < header.bodyLength) {
-      const chunk = await this.source.read(header.bodyLength - offset, signal)
+      const chunk = await this.source.read(header.bodyLength - offset, bodySignal)
       if (chunk === null || chunk.length === 0) {
         throw new FrameRejectedError("truncated frame body", this.protocolState)
       }
