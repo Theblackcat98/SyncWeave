@@ -488,15 +488,25 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if (mode === "real" && realConsentResolver) {
       if (name === "consent-accept" || name === "consent-all") {
         const req = state.request
+        // "Accept all" truly selects everything first.
+        if (name === "consent-all" && req) {
+          req.files.forEach((f) => { f.accepted = true })
+        }
         const accepted = (req?.files ?? [])
           .filter((f) => f.accepted)
           .map((f) => ({ name: f.name, bytes: f.bytes, sha256: pendingSha256.get(f.id) ?? "" }))
           .filter((f) => f.sha256.length === 64)
+        // Enter with nothing selected is a no-op (not a silent decline).
+        if (accepted.length === 0) {
+          state.status = "Choose one or more files, accept all (a), or decline (x)"
+          render()
+          return
+        }
         const resolve = realConsentResolver
         realConsentResolver = null
         state.request = null
         setScreen("workspace")
-        state.status = accepted.length > 0 ? `Accepted ${accepted.length} file(s) · receiving…` : "Declined incoming transfer"
+        state.status = `Accepted ${accepted.length} file(s) · receiving…`
         render()
         resolve(accepted)
         return
@@ -662,6 +672,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if (name === "up" || name === "down") {
       const count = state.request.files.length
       state.selectedConsentFile = clamp(state.selectedConsentFile + (name === "down" ? 1 : -1), 0, Math.max(0, count - 1))
+      // Keep the cursor visible: 10-row window.
+      const windowSize = 10
+      if (state.selectedConsentFile < state.consentScrollOffset) {
+        state.consentScrollOffset = state.selectedConsentFile
+      } else if (state.selectedConsentFile >= state.consentScrollOffset + windowSize) {
+        state.consentScrollOffset = state.selectedConsentFile - windowSize + 1
+      }
       render(); return
     }
     if (name === "space") { command("toggle-consent"); return }

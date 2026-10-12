@@ -86,6 +86,7 @@ export interface AppState {
   diffHunk: number
   request: ConsentRequest | null
   selectedConsentFile: number
+  consentScrollOffset: number
   receiveDestinationIndex: number
   transferQueue: TransferRecord[]
   activeTransferId: string | null

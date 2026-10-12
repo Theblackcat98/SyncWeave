@@ -107,6 +107,12 @@ export function sanitizePeerBasename(peerFileName: string, maxNameBytes: number)
     return codePoint >= 0xd800 && codePoint <= 0xdfff ? "_" : character
   }).join("")
   candidate = candidate.replace(/[\u0000-\u001f\u007f-\u009f<>:"|?*]/g, "_").trim()
+  // Strip Unicode format characters that misrender filenames: bidi overrides
+  // (U+202A–U+202E, U+2066–U+2069), zero-width joiners/spaces (U+200B–U+200F,
+  // U+FEFF), and line/paragraph separators (U+2028/U+2029). Without this,
+  // "invoice‮fdp.exe" displays as "invoiceexe.pdf" but saves with the
+  // override intact.
+  candidate = candidate.replace(/[\u200b-\u200f\u2028-\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
   candidate = candidate.replace(/^\.+/, "").replace(/[. ]+$/, "")
 
   if (candidate.length === 0) {

@@ -76,7 +76,8 @@ function renderHeader(data: RenderData, width: number, compact: boolean): BoxRen
     flexDirection: width < theme.layout.veryNarrowWidth ? "column" : "row",
     alignItems: "center",
     border: !compact,
-    borderColor: theme.border.subtle,
+    // OpenTUI forces a border when borderColor is set even with border:false.
+    ...(compact ? {} : { borderColor: theme.border.subtle }),
     backgroundColor: theme.color.surface,
     paddingLeft: width < theme.layout.veryNarrowWidth ? 0 : 1,
     paddingRight: 1,
@@ -296,7 +297,8 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
     height: compact ? 1 : 4,
     flexDirection: "column",
     border: !compact,
-    borderColor: theme.border.subtle,
+    // OpenTUI forces a border when borderColor is set even with border:false.
+    ...(compact ? {} : { borderColor: theme.border.subtle }),
     backgroundColor: compact ? theme.color.background : theme.color.surface,
     paddingLeft: compact ? 0 : 1,
   })
@@ -353,7 +355,17 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
   card.add(label(renderer, "consent-destination", `Destination: ${data.receiveDestinations[state.receiveDestinationIndex % data.receiveDestinations.length]}  [D] change`, theme.color.muted))
   card.add(label(renderer, "consent-scope", "Review every item. Nothing streams until you accept this transfer.", theme.color.warning))
   const list = panel(renderer, "consent-file-list", { flexDirection: "column", flexGrow: 1, minHeight: 1, marginTop: 1 })
-  request.files.forEach((file, index) => list.add(renderConsentFile(renderer, file, index, state, actions, width)))
+  // Scrollable window: the list can hold 25 files but only ~10 rows fit.
+  const windowSize = 10
+  const offset = Math.min(state.consentScrollOffset, Math.max(0, request.files.length - windowSize))
+  const visible = request.files.slice(offset, offset + windowSize)
+  visible.forEach((file, i) => list.add(renderConsentFile(renderer, file, offset + i, state, actions, width)))
+  if (request.files.length > windowSize) {
+    const acceptedCount = request.files.filter((f) => f.accepted).length
+    const moreAbove = offset > 0 ? `↑ ${offset} more` : ""
+    const moreBelow = offset + windowSize < request.files.length ? `↓ ${request.files.length - offset - windowSize} more` : ""
+    card.add(label(renderer, "consent-scroll-hint", `${moreAbove}${moreAbove && moreBelow ? " · " : ""}${moreBelow} · ${acceptedCount}/${request.files.length} accepted`, theme.color.muted))
+  }
   card.add(list)
   const focused = request.files[state.selectedConsentFile]
   card.add(actionRow(renderer, "consent-file-options", [

@@ -194,6 +194,12 @@ export function validateProtocolFiles(files: unknown, what: string): asserts fil
     if (typeof f.name !== "string" || f.name.length === 0 || Buffer.byteLength(f.name, "utf8") > APP_MAX_NAME_BYTES) {
       throw new Error(`malformed ${what}: bad file name`)
     }
+    // Reject control characters and bidi/zero-width format characters in
+    // advertised names: they misrender on the consent screen ("line1\nline2"
+    // displays as "line1"; U+202E flips the visible name).
+    if (/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u2029\u202a-\u202e\u2066-\u2069\ufeff]/.test(f.name)) {
+      throw new Error(`malformed ${what}: file name contains control or format characters`)
+    }
     if (typeof f.bytes !== "number" || !Number.isSafeInteger(f.bytes) || f.bytes < 0) {
       throw new Error(`malformed ${what}: bad file size for ${f.name}`)
     }
