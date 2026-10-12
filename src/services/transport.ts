@@ -4,6 +4,16 @@ import { NoiseHandshake, x25519Generate, type CipherState } from "./noise.js"
 /** Handshake budget (recorded decision): a stalled peer gets 60s, then the socket is destroyed. */
 const HANDSHAKE_TIMEOUT_MS = 60_000
 
+/** dialNoise gives up on an unresponsive endpoint after 10s. */
+const CONNECT_TIMEOUT_MS = 10_000
+
+/** Max concurrent Noise handshakes on the listener (P0-5). */
+const MAX_CONCURRENT_HANDSHAKES = 4
+/** Max sockets waiting for a handshake slot; excess are destroyed immediately. */
+const MAX_PENDING_QUEUE = 64
+/** Max simultaneous connections (pending + handshaking) per remote IP. */
+const MAX_CONNECTIONS_PER_IP = 8
+
 /**
  * TCP transport for the Phase 2 direct-transfer profile.
  *
@@ -26,52 +36,156 @@ const HANDSHAKE_TIMEOUT_MS = 60_000
 export const DEFAULT_PORT = 24816
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024 + 1024
 
+/**
+ * Pause the socket when buffered inbound bytes exceed ~2 max-size frames.
+ * TCP backpressure then throttles the sender instead of letting one peer
+ * wedge the receiver's memory (P0-4).
+ */
+const HIGH_WATER_BYTES = 2 * MAX_MESSAGE_BYTES
+/**
+ * Hard cap on buffered inbound bytes. If the buffer passes this — i.e.
+ * pause() did not stop delivery, or the reader is wedged — the socket is
+ * destroyed (P0-4).
+ */
+const MAX_BUFFERED_BYTES = 4 * MAX_MESSAGE_BYTES
+
 function writeU32(n: number): Uint8Array {
   const out = new Uint8Array(4)
   new DataView(out.buffer).setUint32(0, n)
   return out
 }
 
+function abortError(signal?: AbortSignal): DOMException {
+  const reason = signal?.reason
+  return reason instanceof Error
+    ? new DOMException(`${reason.name}: ${reason.message}`, "AbortError")
+    : new DOMException(String(reason ?? "aborted"), "AbortError")
+}
+
+/**
+ * A chunk list: incoming segments are appended without copying, and `take`
+ * copies each byte exactly once into the result. This replaces the old
+ * grow-and-concatenate buffer whose per-segment full copy was O(n^2) and
+ * let a 256 MiB transfer peak at 811 MiB RSS (P0-4).
+ */
+class ChunkQueue {
+  private chunks: Uint8Array[] = []
+  private offset = 0 // consumed bytes within chunks[0]
+  private total = 0
+
+  get length(): number {
+    return this.total
+  }
+
+  push(chunk: Uint8Array): void {
+    if (chunk.length === 0) return
+    this.chunks.push(chunk)
+    this.total += chunk.length
+  }
+
+  /** Copy exactly n bytes (n must be <= length); each byte is copied once. */
+  take(n: number): Uint8Array {
+    if (n > this.total) throw new Error("ChunkQueue.take: not enough data")
+    const out = new Uint8Array(n)
+    let written = 0
+    while (written < n) {
+      const first = this.chunks[0]!
+      const available = first.length - this.offset
+      const count = Math.min(available, n - written)
+      out.set(first.subarray(this.offset, this.offset + count), written)
+      written += count
+      this.offset += count
+      this.total -= count
+      if (this.offset >= first.length) {
+        this.chunks.shift()
+        this.offset = 0
+      }
+    }
+    return out
+  }
+}
+
 /**
  * Buffered exact-size reader for a socket. A single persistent 'data'
- * listener feeds a buffer; readExact pulls from it. This avoids
+ * listener feeds a chunk queue; readExact pulls from it. This avoids
  * socket.unshift(), whose re-emission semantics differ across runtimes.
+ *
+ * Backpressure (P0-4): the socket is paused above HIGH_WATER_BYTES and
+ * resumed when the reader needs more data, so a fast or hostile peer
+ * cannot grow the buffer without bound. Above MAX_BUFFERED_BYTES the
+ * socket is destroyed outright.
  */
 class SocketReader {
-  private buffered = new Uint8Array(0)
+  private readonly queue = new ChunkQueue()
   private waiters: Array<() => void> = []
   private ended = false
+  private destroyed = false
   private error: Error | null = null
-  private readonly onData: (chunk: Buffer) => void
+  private paused = false
+
+  private readonly onData = (chunk: Buffer): void => {
+    if (this.destroyed) return
+    this.queue.push(chunk)
+    if (this.queue.length > MAX_BUFFERED_BYTES) {
+      // Flood guard: the peer is buffering faster than we consume (or
+      // pause() is not stopping delivery). Kill the connection.
+      this.error = new Error(
+        `inbound buffer exceeded ${MAX_BUFFERED_BYTES} bytes; closing connection`,
+      )
+      this.socket.destroy()
+      this.wakeWaiters()
+      return
+    }
+    if (!this.paused && this.queue.length > HIGH_WATER_BYTES) {
+      this.paused = true
+      this.socket.pause()
+    }
+    this.wakeWaiters()
+  }
+
+  private readonly onEnd = (): void => {
+    this.ended = true
+    this.wakeWaiters()
+  }
+
+  private readonly onError = (e: Error): void => {
+    this.error = e
+    this.wakeWaiters()
+  }
+
+  private readonly onClose = (): void => {
+    // destroy() without a prior FIN emits 'close' but never 'end'; treat it
+    // as EOF so parked readers wake instead of hanging (P0-8).
+    if (!this.ended) {
+      this.ended = true
+      this.wakeWaiters()
+    }
+  }
 
   constructor(private readonly socket: Socket) {
-    this.onData = (chunk: Buffer) => {
-      const grown = new Uint8Array(this.buffered.length + chunk.length)
-      grown.set(this.buffered)
-      grown.set(chunk, this.buffered.length)
-      this.buffered = grown
-      const waiters = this.waiters
-      this.waiters = []
-      for (const w of waiters) w()
-    }
     socket.on("data", this.onData)
-    socket.on("end", () => {
-      this.ended = true
-      const waiters = this.waiters
-      this.waiters = []
-      for (const w of waiters) w()
-    })
-    socket.on("error", (e) => {
-      this.error = e
-      const waiters = this.waiters
-      this.waiters = []
-      for (const w of waiters) w()
-    })
+    socket.on("end", this.onEnd)
+    socket.on("error", this.onError)
+    socket.on("close", this.onClose)
+  }
+
+  private wakeWaiters(): void {
+    const waiters = this.waiters
+    this.waiters = []
+    for (const w of waiters) w()
+  }
+
+  private resumeIfPaused(): void {
+    if (this.paused) {
+      this.paused = false
+      this.socket.resume()
+    }
   }
 
   async readExact(n: number, signal?: AbortSignal): Promise<Uint8Array | null> {
-    while (this.buffered.length < n) {
+    while (this.queue.length < n) {
       if (this.error) throw this.error
+      if (this.destroyed) break
       if (this.ended) {
         // FIN was received, but 'data' events already queued in the event
         // loop may not have fired yet. Yield once to let them arrive before
@@ -81,15 +195,15 @@ class SocketReader {
         // After the yield, whatever is buffered is all there is.
         break
       }
-      if (signal?.aborted) {
-        const reason = signal.reason
-        throw reason instanceof Error ? reason : new DOMException(String(reason ?? "aborted"), "AbortError")
-      }
+      if (signal?.aborted) throw abortError(signal)
+      // The reader demonstrably needs more data: make sure the socket is
+      // flowing before parking (this is also what keeps a paused socket
+      // from deadlocking against a pending FIN).
+      this.resumeIfPaused()
       await new Promise<void>((resolve, reject) => {
         const onAbort = () => {
           this.waiters = this.waiters.filter((w) => w !== done)
-          const reason = signal?.reason
-          reject(reason instanceof Error ? reason : new DOMException(String(reason ?? "aborted"), "AbortError"))
+          reject(abortError(signal))
         }
         const done = () => {
           signal?.removeEventListener("abort", onAbort)
@@ -99,19 +213,22 @@ class SocketReader {
         signal?.addEventListener("abort", onAbort, { once: true })
       })
     }
-    if (this.buffered.length === 0) {
+    if (this.queue.length === 0) {
       return null
     }
     // After end, a short final read is possible; callers treat a short
     // read as a truncated stream.
-    const take = Math.min(n, this.buffered.length)
-    const out = this.buffered.subarray(0, take)
-    this.buffered = this.buffered.subarray(take)
-    return Uint8Array.from(out)
+    return this.queue.take(Math.min(n, this.queue.length))
   }
 
   destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
     this.socket.removeListener("data", this.onData)
+    // Resume so a pending FIN/'end' is still delivered to the other
+    // listeners, then wake any parked readers (P0-8).
+    this.resumeIfPaused()
+    this.wakeWaiters()
   }
 }
 
@@ -124,6 +241,11 @@ async function readMessage(reader: SocketReader, signal?: AbortSignal): Promise<
     throw new Error("truncated transport message length")
   }
   const length = new DataView(lenBytes.buffer, lenBytes.byteOffset, 4).getUint32(0)
+  // A zero-length transport message is a protocol error, never end-of-stream
+  // (P1-17): neither handshake messages nor encrypted frames can be empty.
+  if (length === 0) {
+    throw new Error("transport message with zero length")
+  }
   if (length > MAX_MESSAGE_BYTES) {
     throw new Error(`transport message length ${length} exceeds maximum`)
   }
@@ -201,7 +323,7 @@ export class NoiseChannel {
     read(n: number, signal?: AbortSignal): Promise<Uint8Array | null>
   } {
     const iterator = this.receive(signal)[Symbol.asyncIterator]()
-    let buffered = new Uint8Array(0)
+    const buffered = new ChunkQueue()
     let done = false
     return {
       read: async (n: number, readSignal?: AbortSignal): Promise<Uint8Array | null> => {
@@ -211,34 +333,24 @@ export class NoiseChannel {
         // body/header timeouts never fire.)
         const effective = readSignal ?? signal
         while (buffered.length < n && !done) {
-          if (effective?.aborted) {
-            throw new DOMException(String(effective.reason ?? "aborted"), "AbortError")
-          }
+          if (effective?.aborted) throw abortError(effective)
           const next = await Promise.race([
             iterator.next(),
             new Promise<never>((_, reject) => {
-              effective?.addEventListener(
-                "abort",
-                () => reject(new DOMException(String(effective.reason ?? "aborted"), "AbortError")),
-                { once: true },
-              )
+              effective?.addEventListener("abort", () => reject(abortError(effective)), { once: true })
             }),
           ])
           if (next.done) {
             done = true
             break
           }
-          const grown = new Uint8Array(buffered.length + next.value.length)
-          grown.set(buffered)
-          grown.set(next.value, buffered.length)
-          buffered = grown
+          buffered.push(next.value)
         }
         if (buffered.length === 0) {
           return null
         }
-        const out = buffered.subarray(0, Math.min(n, buffered.length))
-        buffered = buffered.subarray(out.length)
-        return out.length === 0 ? null : Uint8Array.from(out)
+        const out = buffered.take(Math.min(n, buffered.length))
+        return out.length === 0 ? null : out
       },
     }
   }
@@ -359,14 +471,45 @@ export function dialNoise(host: string, port: number, signal?: AbortSignal): Pro
       reject(new Error("Only numeric IP endpoints are allowed (no DNS, no discovery)"))
       return
     }
+    if (signal?.aborted) {
+      reject(abortError(signal))
+      return
+    }
     const socket = connect({ host, port })
+    let settled = false
+    // A blackholed address must not hang the dial forever (P0-8).
+    const connectTimer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener("abort", onAbort)
+      socket.destroy()
+      reject(new Error(`connect to ${host}:${port} timed out after ${CONNECT_TIMEOUT_MS / 1000}s: peer unreachable or not listening`))
+    }, CONNECT_TIMEOUT_MS)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(connectTimer)
+      socket.destroy()
+      reject(abortError(signal))
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
     const onError = (error: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(connectTimer)
+      signal?.removeEventListener("abort", onAbort)
       socket.destroy()
       reject(error)
     }
     socket.once("error", onError)
     socket.once("connect", () => {
+      if (settled) return
+      settled = true
+      clearTimeout(connectTimer)
       socket.removeListener("error", onError)
+      // The handshake phase honors the caller's signal via runHandshake;
+      // the pre-connect abort listener above has done its job.
+      signal?.removeEventListener("abort", onAbort)
       runHandshake(socket, true, signal).then(resolve, (error: unknown) => {
         socket.destroy()
         reject(error instanceof Error ? error : new Error(String(error)))
@@ -381,10 +524,21 @@ export interface ListenerOptions {
   signal?: AbortSignal
 }
 
+interface PendingHandshake {
+  socket: Socket
+  /** Fires HANDSHAKE_TIMEOUT_MS after the socket was accepted. */
+  deadline: AbortController
+  deadlineTimer: ReturnType<typeof setTimeout>
+}
+
 /**
  * Start an explicit, user-controlled listener. The receiver starts this
  * deliberately and stops it deliberately; nothing listens implicitly.
  * Resolves with the server and an async iterator of accepted Noise channels.
+ *
+ * Handshakes run concurrently (capped at MAX_CONCURRENT_HANDSHAKES) so one
+ * idle peer cannot stall the rest, and the 60s handshake budget starts when
+ * the socket is accepted, not when a handshake slot frees up (P0-5).
  */
 export function listenNoise(options: ListenerOptions): Promise<{
   server: Server
@@ -394,53 +548,170 @@ export function listenNoise(options: ListenerOptions): Promise<{
 }> {
   return new Promise((resolve, reject) => {
     const server = createServer()
-    const pending: Socket[] = []
-    let acceptResolve: ((value: IteratorResult<Socket>) => void) | null = null
+    const pending: PendingHandshake[] = []
+    const inFlight = new Set<Socket>()
+    /** Sockets accepted but not yet released (pending or handshaking). */
+    const live = new Set<Socket>()
+    const ipCounts = new Map<string, number>()
+    const completed: HandshakeResult[] = []
+    let completedResolve: (() => void) | null = null
+    let acceptStopped = false
+    let closed = false
+
+    const track = (socket: Socket): void => {
+      live.add(socket)
+      const ip = socket.remoteAddress ?? "unknown"
+      ipCounts.set(ip, (ipCounts.get(ip) ?? 0) + 1)
+    }
+
+    const release = (socket: Socket): void => {
+      if (!live.delete(socket)) return
+      const ip = socket.remoteAddress ?? "unknown"
+      const n = (ipCounts.get(ip) ?? 0) - 1
+      if (n <= 0) ipCounts.delete(ip)
+      else ipCounts.set(ip, n)
+    }
+
+    const dequeue = (socket: Socket): void => {
+      const idx = pending.findIndex((p) => p.socket === socket)
+      if (idx < 0) return
+      const [item] = pending.splice(idx, 1)
+      clearTimeout(item.deadlineTimer)
+    }
+
+    const killSocket = (socket: Socket): void => {
+      dequeue(socket)
+      release(socket)
+      socket.destroy()
+    }
+
+    const wakeAcceptor = (): void => {
+      const r = completedResolve
+      completedResolve = null
+      r?.()
+    }
+
+    const pump = (): void => {
+      if (acceptStopped || closed) return
+      while (inFlight.size < MAX_CONCURRENT_HANDSHAKES && pending.length > 0) {
+        const item = pending.shift()!
+        inFlight.add(item.socket)
+        void (async (): Promise<{ ok: true; result: HandshakeResult } | { ok: false }> => {
+          try {
+            // The accept-time deadline dominates: it fires 60s after the
+            // socket arrived, while runHandshake's own budget starts at
+            // dequeue. Whichever fires first wins.
+            const hsSignal = options.signal
+              ? AbortSignal.any([options.signal, item.deadline.signal])
+              : item.deadline.signal
+            const result = await runHandshake(item.socket, false, hsSignal)
+            return { ok: true, result }
+          } catch {
+            return { ok: false }
+          } finally {
+            // A completed handshake owns its socket now; the deadline must
+            // not fire later and kill an established channel.
+            clearTimeout(item.deadlineTimer)
+          }
+        })().then((outcome) => {
+          inFlight.delete(item.socket)
+          if (outcome.ok) {
+            release(item.socket)
+            // Bound the completed queue too: an attacker that handshakes
+            // but is never consumed must not accumulate channels forever.
+            if (completed.length >= MAX_PENDING_QUEUE) {
+              completed.shift()!.channel.abort()
+            }
+            completed.push(outcome.result)
+            wakeAcceptor()
+          } else {
+            killSocket(item.socket)
+          }
+          pump()
+        })
+      }
+    }
 
     server.on("connection", (socket: Socket) => {
-      if (acceptResolve) {
-        const r = acceptResolve
-        acceptResolve = null
-        r({ value: socket, done: false })
-      } else {
-        pending.push(socket)
+      // Error and close handlers are attached at accept (P0-5): a queued
+      // socket that errors or vanishes must not crash the process or leak
+      // queue slots and per-IP counts.
+      socket.on("error", () => killSocket(socket))
+      socket.once("close", () => killSocket(socket))
+
+      const ip = socket.remoteAddress ?? "unknown"
+      if (
+        closed ||
+        acceptStopped ||
+        pending.length >= MAX_PENDING_QUEUE ||
+        (ipCounts.get(ip) ?? 0) >= MAX_CONNECTIONS_PER_IP
+      ) {
+        socket.destroy()
+        return
       }
+      track(socket)
+      // The 60s handshake budget starts at accept, not at dequeue: N idle
+      // connections must not delay a legitimate peer by N x 60s (P0-5).
+      const deadline = new AbortController()
+      const deadlineTimer = setTimeout(() => {
+        deadline.abort(
+          new Error(`Noise handshake timed out after ${HANDSHAKE_TIMEOUT_MS / 1000}s: peer stopped responding`),
+        )
+        killSocket(socket)
+      }, HANDSHAKE_TIMEOUT_MS)
+      pending.push({ socket, deadline, deadlineTimer })
+      pump()
     })
     server.on("error", reject)
     server.listen(options.port ?? DEFAULT_PORT, options.host, () => {
       const address = server.address()
       const port = typeof address === "object" && address ? address.port : (options.port ?? DEFAULT_PORT)
+
       async function* accept(): AsyncGenerator<HandshakeResult> {
-        while (true) {
-          let socket: Socket
-          if (pending.length > 0) {
-            socket = pending.shift()!
-          } else {
-            const next = await new Promise<IteratorResult<Socket>>((res) => {
-              acceptResolve = res
-              options.signal?.addEventListener("abort", () => res({ value: undefined as never, done: true }), { once: true })
+        const onAbort = (): void => {
+          acceptStopped = true
+          wakeAcceptor()
+        }
+        if (options.signal?.aborted) return
+        options.signal?.addEventListener("abort", onAbort, { once: true })
+        try {
+          while (true) {
+            pump()
+            const next = completed.shift()
+            if (next) {
+              yield next
+              continue
+            }
+            if (acceptStopped) return
+            await new Promise<void>((res) => {
+              completedResolve = res
             })
-            if (next.done) return
-            socket = next.value
+            completedResolve = null
           }
-          try {
-            yield await runHandshake(socket, false, options.signal)
-          } catch {
-            socket.destroy()
-            // A failed handshake must not kill the listener; the next
-            // connection is still accepted.
-          }
+        } finally {
+          options.signal?.removeEventListener("abort", onAbort)
         }
       }
+
+      const close = (): Promise<void> =>
+        new Promise<void>((res) => {
+          closed = true
+          acceptStopped = true
+          // Destroy everything we still own: queued and in-flight
+          // handshakes. Already-yielded channels belong to the caller;
+          // completed-but-unyielded channels would otherwise leak.
+          for (const item of pending.splice(0)) clearTimeout(item.deadlineTimer)
+          for (const s of [...live]) killSocket(s)
+          for (const hs of completed.splice(0)) hs.channel.abort()
+          wakeAcceptor()
+          server.close(() => res())
+        })
+
       resolve({
         server,
         port,
         accept,
-        close: () =>
-          new Promise<void>((res) => {
-            for (const s of pending) s.destroy()
-            server.close(() => res())
-          }),
+        close,
       })
     })
   })

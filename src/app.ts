@@ -907,10 +907,16 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       render()
       return
     }
-    const files = stagedEntries("local").filter((e) => e.kind === "file")
+    const staged = stagedEntries("local")
+    // Special files (symlinks, FIFOs, sockets, devices) are listed but never
+    // sent: a symlink to /dev/zero would hash forever, a FIFO would hang.
+    const skipped = staged.filter((e) => e.kind === "file" && e.unsupported)
+    const files = staged.filter((e) => e.kind === "file" && !e.unsupported)
     const destination = peer()
     if (files.length === 0) {
-      state.status = "Stage at least one file first · Space selects"
+      state.status = skipped.length > 0
+        ? `Only special files staged (${skipped.map((s) => `${s.name}: ${s.unsupported}`).join(", ")}) — not sendable`
+        : "Stage at least one file first · Space selects"
       render()
       return
     }

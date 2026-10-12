@@ -15,6 +15,8 @@ export interface MockEntry {
   bytes: number
   state: SyncState
   summary?: string
+  /** Set for entries that cannot be sent (symlink, FIFO, socket, device). */
+  unsupported?: string
 }
 
 export interface MockPeer {

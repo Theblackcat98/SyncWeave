@@ -222,14 +222,27 @@ function renderPane(data: RenderData, pane: Pane, paneWidth: number, height: num
       },
     })
     row.add(label(renderer, `${pane}-entry-state-${entry.id}`, left, focused ? theme.color.white : stateColor(entry.state)))
-    row.add(label(renderer, `${pane}-entry-name-${entry.id}`, truncate(entry.name, nameWidth), focused ? theme.color.white : theme.color.text))
+    // Unsupported entries (symlink, FIFO…) show their reason instead of a size.
+    const displayName = entry.unsupported ? `${entry.name} [${entry.unsupported}]` : entry.name
+    row.add(label(renderer, `${pane}-entry-name-${entry.id}`, truncate(displayName, nameWidth), focused ? theme.color.white : entry.unsupported ? theme.color.muted : theme.color.text))
     const meta = entry.kind === "directory" ? "DIR" : realMode ? right.slice(1) : `${right.slice(1)} ${stateLabel}`
     row.add(label(renderer, `${pane}-entry-meta-${entry.id}`, truncate(` ${meta}`, 16), stateColor(entry.state)))
     paneBox.add(row)
   })
 
   if (offset + rows < entries.length) paneBox.add(label(renderer, `${pane}-scroll-bottom`, `↓ ${entries.length - offset - rows} more · mouse wheel to scroll`, theme.color.dim))
-  if (entries.length === 0) paneBox.add(label(renderer, `${pane}-empty`, data.mode === "real" ? "This folder is empty." : "This mock folder is empty.", theme.color.muted))
+  if (entries.length === 0) {
+    const listErr = data.filesystem.listError?.(pane, state.paths[pane])
+    const emptyText = listErr
+      ? `Cannot read folder: ${listErr}`
+      : data.mode === "real" ? "This folder is empty." : "This mock folder is empty."
+    paneBox.add(label(renderer, `${pane}-empty`, emptyText, listErr ? theme.color.danger : theme.color.muted))
+  } else {
+    const total = data.filesystem.listTotal?.(pane, state.paths[pane])
+    if (total !== undefined && total > entries.length) {
+      paneBox.add(label(renderer, `${pane}-truncated`, `Showing first ${entries.length} of ${total} entries`, theme.color.muted))
+    }
+  }
   return paneBox
 }
 
