@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createCliRenderer } from "@opentui/core"
-import { mkdirSync, readdirSync, unlinkSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { createSyncWeaveApp, type RealTransport } from "./app.js"
@@ -9,6 +9,7 @@ import { logEvent } from "./services/diagnostic-log.js"
 import type { FileSystemService } from "./services/ports.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
 import { loadDestinations } from "./services/destinations.js"
+import { sweepOrphanPartials } from "./services/safe-receive-sink.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "./services/mock-transfer-service.js"
 import { NullPeerService, NullTransferService } from "./services/null-services.js"
@@ -137,18 +138,10 @@ if (!realMode) {
   }
   // Sweep orphaned staging temp files from killed sessions (kill -9,
   // SIGTERM before handlers ran, crashes). They are never user data.
-  try {
-    let swept = 0
-    for (const name of readdirSync(receiveDirectory)) {
-      if (name.startsWith(".syncweave-") && name.endsWith(".partial")) {
-        try {
-          unlinkSync(join(receiveDirectory, name))
-          swept++
-        } catch { /* best effort */ }
-      }
-    }
+  {
+    const swept = await sweepOrphanPartials(receiveDirectory)
     if (swept > 0) logEvent("startup-sweep", `removed ${swept} orphaned partial file(s)`)
-  } catch { /* best effort */ }
+  }
 
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
   logEvent("session-start", `real mode alias=${alias} port=${tcpPort} bind=${bindAddr}`)

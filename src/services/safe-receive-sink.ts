@@ -360,3 +360,25 @@ export async function receiveToFile(
     }
   }
 }
+
+/**
+ * Remove orphaned `.syncweave-*.partial` staging files left in `directory` by
+ * killed sessions. Must never delete a partial that a live receive (in this
+ * or another running instance) is still writing. Returns the number removed.
+ */
+export async function sweepOrphanPartials(directory: string): Promise<number> {
+  const { readdir, unlink } = await import("node:fs/promises")
+  const { join } = await import("node:path")
+  let swept = 0
+  try {
+    for (const name of await readdir(directory)) {
+      if (name.startsWith(".syncweave-") && name.endsWith(".partial")) {
+        try {
+          await unlink(join(directory, name))
+          swept++
+        } catch { /* best effort */ }
+      }
+    }
+  } catch { /* best effort */ }
+  return swept
+}

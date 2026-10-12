@@ -654,6 +654,14 @@ export interface SendOptions {
    */
   identity?: EphemeralIdentity
   signal?: AbortSignal
+  /**
+   * Sender-side SAS gate (P0-1). Called after the receiver's identity proof
+   * verifies and BEFORE any file metadata (TRANSFER_REQUEST) is sent. The UI
+   * shows `sas` (and `peerId`) and resolves true only when the user confirms
+   * it matches the receiver's screen. Resolving false cancels the session.
+   * If omitted, no sender-side confirmation is performed (tests).
+   */
+  confirmSas?: (info: { sas: string; peerId: string; signal: AbortSignal }) => Promise<boolean>
   /** Progress callback for UI: (fileIndex, fileName, bytesSent, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesSent: number, fileBytes: number) => void
 }
@@ -998,8 +1006,19 @@ export interface ReceiveOptions {
    */
   onTransferRequest: (request: {
     peerId: string
+    /**
+     * Requested files. Return a subset of THESE object references: acceptance
+     * is mapped back to request indices by reference (identical files in one
+     * request must remain distinguishable).
+     */
     files: ProtocolFile[]
     sas: string
+    /**
+     * Aborts when the consent window ends without an answer: sender
+     * disconnect/cancel, consent deadline, or local abort. The UI must tear
+     * down its prompt when this fires.
+     */
+    signal: AbortSignal
   }) => Promise<ProtocolFile[]>
   /**
    * Inject a pre-generated identity (tests). Generated fresh if omitted.
@@ -1130,7 +1149,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
       }, consentDeadlineMs)
       try {
         accepted = await Promise.race([
-          onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas }),
+          onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas, signal: consentDeadline.signal }),
           new Promise<never>((_, reject) => {
             consentDeadline.signal.addEventListener("abort", () => reject(consentDeadline.signal.reason), { once: true })
           }),
