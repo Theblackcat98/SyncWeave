@@ -6,6 +6,7 @@ import { RealFileSystemService } from "./services/real-filesystem.js"
 import type { EphemeralIdentity } from "./services/peer-id.js"
 import { listenNoise } from "./services/transport.js"
 import { receiveFiles, sendFiles, TransferDeclinedError, PeerCancelledError, SendAbortedError } from "./services/transfer-protocol.js"
+import { friendlyErrorMessage } from "./services/friendly-errors.js"
 import type { DiscoveryService, DiscoveredPeer } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
 type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
@@ -909,7 +910,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
               createdAt: Date.now(),
             }, ...state.transferQueue].slice(0, 50)
           } catch (error) {
-            state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
+            state.status = `Receive failed: ${friendlyErrorMessage(error)}`
             logEvent("transfer-fail", `receive: ${error instanceof Error ? error.message : String(error)}`)
           }
           render()
@@ -1042,7 +1043,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         state.status = `Send interrupted: ${ok}/${error.outcomes.length} file(s) confirmed by receiver`
         record.status = "failed"
       } else {
-        state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+        state.status = `Send failed: ${friendlyErrorMessage(error)}`
         record.status = "failed"
       }
       logEvent("transfer-fail", `send to ${destination.name}: ${error instanceof Error ? error.message : String(error)}`)
