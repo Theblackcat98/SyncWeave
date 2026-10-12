@@ -28,6 +28,8 @@ export interface RealTransport {
   receiveDirectory: string
   /** Aborts the listener accept loop; aborted on app dispose. */
   aborter: AbortController
+  /** Non-fatal startup issue to surface in the TUI (e.g. discovery failed). */
+  startupWarning: string | null
 }
 
 export interface AppDependencies {
@@ -70,6 +72,11 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   const state = createInitialAppState(filesystem.paths, dependencies.reducedMotion)
   if (mode === "real") {
     state.status = "Ready · listening for peers on the LAN"
+  }
+  if (mode === "real" && dependencies.real?.startupWarning) {
+    // Surface non-fatal startup issues (e.g. discovery bind failure) where
+    // the user can actually see them — stderr is captured once the TUI runs.
+    state.status = dependencies.real.startupWarning
   }
   const clock = new AnimationClock()
   let paused = false
@@ -844,7 +851,14 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
    * Real-mode send: staged real files → selected discovered/manual peer →
    * sendFiles with progress. Called from the send-review confirm action.
    */
+  let realSendInFlight = false
   async function beginRealSend(real: RealTransport): Promise<void> {
+    // A double Enter must not send twice.
+    if (realSendInFlight) {
+      state.status = "Send already in progress…"
+      render()
+      return
+    }
     const files = stagedEntries().filter((e) => e.kind === "file")
     const destination = peer()
     if (files.length === 0) {
@@ -862,6 +876,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     // Stay on the workspace screen: progress flows through the status line.
     // (The transfer screen is mock-driven and would show "No transfer is active.")
     render()
+    realSendInFlight = true
     try {
       await sendFiles({
         host: destination.host,
@@ -882,6 +897,8 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       state.staged[state.activePane].clear()
     } catch (error) {
       state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      realSendInFlight = false
     }
     render()
   }
