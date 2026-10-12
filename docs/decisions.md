@@ -33,6 +33,18 @@ silently deviate from this record; changes need a new recorded decision.
   the complete expected Peer ID with the verified identity on the exact
   authenticated connection before any metadata flows. No identity keys or IDs
   are persisted; a mismatch aborts the session.
+- **Protocol v2 (2026-10-12):** the wire version was bumped after a
+  hostile-peer audit. Changes: identity proofs sign a tagged, role-bound
+  message (`syncweave-id-proof-v2 ‖ role ‖ 0x02 ‖ handshakeHash`) with a
+  Noise prologue; a short authentication string (SAS, `1234-5678-9012`)
+  derived from the handshake hash is shown on both ends for human
+  confirmation (discovery aliases are unauthenticated); the receiver
+  acknowledges each file (`FILE_RESULT`) and the session (`SESSION_RESULT`)
+  — the sender reports success only on matching acks; explicit
+  `DECLINE`/`CANCEL`/`ERROR` frames; per-type body caps (handshake-adjacent
+  ≤4 KiB, request/accept ≤64 KiB, chunk ciphertext ≤65,535 B); ACCEPT by
+  unique indices; session ID derived from the transcript hash and validated
+  per frame. v1 is rejected.
 - **Bootstrap:** automatic peer discovery via UDP multicast (LocalSend-style),
   plus manual numeric `IP:port` entry as fallback. Discovered peers are shown
   for the user to pick; discovery never substitutes for identity confirmation.

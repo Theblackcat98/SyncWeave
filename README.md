@@ -42,7 +42,10 @@ Flags:
 | `--real` | off | Real mode: live identity, TCP listener, discovery, real filesystem. |
 | `--alias <name>` | `$USER` | Display name announced to peers. |
 | `--port <n>` | 24816 | TCP port for the Noise listener. |
+| `--bind <addr>` | `::` | Local address to bind (dual-stack IPv4/IPv6). Use `127.0.0.1` to stay off the LAN. |
 | `--peer <host:port>` | — | Manual peer (repeatable). Fallback when multicast discovery is unavailable; IPv6 as `--peer [::1]:24816`. |
+| `--help, -h` | — | Show help and exit. |
+| `--version` | — | Show version and exit. |
 
 Two instances on the **same machine** need distinct ports, pointed at each
 other:
@@ -54,10 +57,14 @@ bun src/main.ts --real --alias laptop2 --port 24818 --peer 127.0.0.1:24816
 
 Workflow: browse your real files, `Space` to stage, `Tab` to the Receiver
 pane, `↑/↓` to pick a peer, `Tab` back, `s` then `Enter` to send. The
-receiver gets a consent screen — keyboard `a` accepts all, `Enter` accepts
-the selection, `x` declines. Accepted files land in `~/Downloads` with
-automatic rename on collision. Network details, firewall notes, and what is
-still unverified live in [docs/networking.md](docs/networking.md).
+receiver gets a consent screen showing a **security code** — confirm it with
+the sender out of band (in person, over a call) before accepting, because
+discovery aliases are unauthenticated and can be spoofed. Keyboard `a`
+accepts all, `Enter` accepts the selection, `x` declines. Accepted files
+land in `~/Downloads` with automatic rename on collision. The sender only
+reports success after the receiver acknowledges each file. Network details,
+firewall notes, and what is still unverified live in
+[docs/networking.md](docs/networking.md).
 
 ## Workflow
 
