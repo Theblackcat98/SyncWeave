@@ -15,37 +15,31 @@ Nothing ever leaves your network. There are no servers, no accounts, and no tele
 
 ## Screenshots
 
-### Workspace — stage files, choose a peer
+Captured from the real app running in `--real` mode — live files, real theme, no simulation.
 
-The local pane shows your files; the remote pane shows the selected peer. Staged files are highlighted and tallied at the bottom.
+### Workspace — your files, peer status, never their files
+
+The local pane shows your files; the remote pane shows peer, session, and transfer status only. The receiver's filesystem is never visible — that's out of scope by design.
+
+![SyncWeave workspace in real mode](docs/screenshots/01-workspace.png)
+
+### Staging — pick what goes
+
+`Space` stages files. The tally at the bottom keeps count.
 
 ![Workspace with staged files](docs/screenshots/02-workspace-staged.png)
 
 ### Send review — confirm before anything moves
 
-Review exactly what will go out and to whom. In real mode this is also where both sides compare the security code before any file names cross the wire.
+Review exactly what will go out. In real mode this is also where both sides compare the security code before any file names cross the wire.
 
 ![Send review](docs/screenshots/03-send-review.png)
-
-### Consent — nothing arrives uninvited
-
-Every incoming transfer waits for your explicit approval. You see the sender, the file list, the destination, and the security code — accept all, accept a subset, or decline. You have 60 seconds to decide.
-
-![Incoming consent screen](docs/screenshots/04-consent-incoming.png)
-
-### Transfer — per-file acknowledgement
-
-The sender only reports success when the receiver acknowledges each file with a matching hash and size. Name collisions never overwrite: the second copy becomes `name (1).ext`.
-
-![Transfer progress](docs/screenshots/07-transfer.png)
 
 ### Help — every key, one screen away
 
 Press `?` anywhere.
 
 ![Help screen](docs/screenshots/05-help.png)
-
-> Screenshots were captured from the app's own test renderer — real frames, real theme, real Nerd Font icons. Mock mode is shown; the layout is identical in real mode.
 
 ## Modes
 
