@@ -89,7 +89,8 @@ function renderHeader(data: RenderData, width: number, compact: boolean): BoxRen
   }
   const frame = motion.discovery[state.discoveryFrame % motion.discovery.length]
   const onlineCount = peers.filter((peer) => peer.online).length
-  const peerText = wideHeader ? `  ${frame} MOCK DISCOVERY · ${onlineCount} peers` : `  ${frame} ${onlineCount} mock peers`
+  const discoveryLabel = data.mode === "real" ? "DISCOVERY" : "MOCK DISCOVERY"
+  const peerText = wideHeader ? `  ${frame} ${discoveryLabel} · ${onlineCount} peers` : `  ${frame} ${onlineCount} ${data.mode === "real" ? "peers" : "mock peers"}`
   header.add(label(renderer, "mock-discovery", truncate(peerText, Math.max(12, width - 22)), theme.color.success))
   if (wideHeader) {
     const activePeer = peers[state.peerIndex % Math.max(1, peers.length)]
@@ -296,16 +297,20 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
 }
 
 function renderSendReview(parent: BoxRenderable, data: RenderData, width: number): void {
-  const { renderer, state, filesystem, actions, peers } = data
+  const { renderer, state, filesystem, actions, peers, mode } = data
   const files = filesystem.list(state.activePane, state.paths[state.activePane]).filter((entry) => state.staged[state.activePane].has(entry.id))
   const peer = peers[state.peerIndex % Math.max(1, peers.length)]
   const card = pageCard(renderer, "send-review", "Review outgoing files", theme.color.focus, state.revealFrame)
   card.add(label(renderer, "send-direction", `${state.activePane === "local" ? "Local" : "Remote"} → ${peer?.name ?? "no peer selected"}`, theme.color.remote))
-  card.add(label(renderer, "send-mock-note", "Mock preview only · no files or network requests are sent.", theme.color.warning))
+  if (mode !== "real") {
+    card.add(label(renderer, "send-mock-note", "Mock preview only · no files or network requests are sent.", theme.color.warning))
+  }
   card.add(label(renderer, "send-count", `${files.length} staged  ·  ${formatBytes(files.reduce((sum, file) => sum + file.bytes, 0))}`, theme.color.white))
   files.slice(0, 8).forEach((file, index) => card.add(label(renderer, `send-file-${index}`, `  ✓ ${file.name}  ${formatBytes(file.bytes)}`, theme.color.text)))
   if (files.length > 8) card.add(label(renderer, "send-overflow", `  + ${files.length - 8} more`, theme.color.muted))
-  card.add(label(renderer, "send-consent-explainer", "Next: preview a receiver-hosted request. Accepted files alone advance to mock progress.", theme.color.muted))
+  card.add(label(renderer, "send-consent-explainer", mode === "real"
+    ? "Next: the receiver reviews and accepts. Files stream only after their consent."
+    : "Next: preview a receiver-hosted request. Accepted files alone advance to mock progress.", theme.color.muted))
   card.add(actionRow(renderer, "send-actions", [
     actionButton(renderer, "send-submit", "Ask receiver · Enter", "send-to-consent", actions.command, { disabled: files.length === 0 }),
     actionButton(renderer, "send-back", "Back · Esc", "workspace", actions.command, { fg: theme.color.muted }),
@@ -364,9 +369,9 @@ function renderConsentFile(renderer: CliRenderer, file: ConsentFile, index: numb
 }
 
 function renderTransfer(parent: BoxRenderable, data: RenderData, width: number): void {
-  const { renderer, state, actions, queue } = data
+  const { renderer, state, actions, queue, mode } = data
   const transfer = queue.find((item) => item.id === state.activeTransferId)
-  const card = pageCard(renderer, "transfer-status", "Mock transfer", transfer?.status === "complete" ? theme.color.success : transfer?.status === "failed" ? theme.color.danger : theme.color.focus, state.revealFrame)
+  const card = pageCard(renderer, "transfer-status", mode === "real" ? "Transfer" : "Mock transfer", transfer?.status === "complete" ? theme.color.success : transfer?.status === "failed" ? theme.color.danger : theme.color.focus, state.revealFrame)
   if (!transfer) {
     card.add(label(renderer, "transfer-missing", "No transfer is active.", theme.color.muted))
     parent.add(card)
@@ -477,7 +482,7 @@ function renderDiff(parent: BoxRenderable, data: RenderData, width: number): voi
 }
 
 function renderHelp(parent: BoxRenderable, data: RenderData, width: number): void {
-  const { renderer, state, actions } = data
+  const { renderer, state, actions, mode } = data
   const card = pageCard(renderer, "help-screen", "Keyboard & mouse help", theme.color.focus, state.revealFrame)
   const rows = [
     ["↑ / ↓", "Move through files; directories use Enter"],
@@ -485,9 +490,9 @@ function renderHelp(parent: BoxRenderable, data: RenderData, width: number): voi
     ["Space", "Stage / unstage the focused file"],
     ["a / A", "Stage all / clear staging in the active folder"],
     ["Enter / Backspace", "Open directory / go to its parent"],
-    ["s", "Review staged files and simulate a send"],
-    ["i", "Create a mock incoming request"],
-    ["q / v / p", "Peer preview / manual fingerprint comparison / Favorites"],
+    ["s", mode === "real" ? "Review staged files and send to the selected peer" : "Review staged files and simulate a send"],
+    ["i", mode === "real" ? "Incoming transfers arrive from the network" : "Create a mock incoming request"],
+    ["q / v / p", mode === "real" ? "Peer list is in the Receiver pane" : "Peer preview / manual fingerprint comparison / Favorites"],
     ["d / t / ?", "Diff / transfer queue / help"],
     ["Mouse", "Click rows and actions; scroll panes to browse"],
     ["Narrow screens", "Use Local / Remote tabs and the Stage, Send, and Receive toolbar actions"],

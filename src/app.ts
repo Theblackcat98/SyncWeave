@@ -252,7 +252,11 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   }
 
   function tickDiscovery(): void {
-    peers.splice(0, peers.length, ...peerService.pulse())
+    // In real mode the peer list comes from UDP-multicast discovery (synced
+    // on its own timer in setupRealMode); never overwrite it with mock peers.
+    if (mode !== "real") {
+      peers.splice(0, peers.length, ...peerService.pulse())
+    }
     state.discoveryFrame = (state.discoveryFrame + 1) % motion.discovery.length
     render()
   }
@@ -570,9 +574,22 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if (name === "backspace") { goParentDirectory(); return }
     switch (name) {
       case "s": openSendReview(); return
-      case "i": createIncomingRequest(); return
+      case "i":
+        if (mode === "real") {
+          state.status = "Incoming transfers arrive from the network · listening…"
+          render()
+          return
+        }
+        createIncomingRequest()
+        return
       case "d": openDiff(); return
-      case "q": state.identityStep = 0; setScreen("peer"); return
+      case "q":
+        if (mode === "real") {
+          state.status = "Peer list is in the Receiver pane · Tab to switch, ↑/↓ to choose"
+          render()
+          return
+        }
+        state.identityStep = 0; setScreen("peer"); return
       case "p": openFavorites(); return
       case "t": setScreen("queue"); return
       case "?": setScreen("help"); return
