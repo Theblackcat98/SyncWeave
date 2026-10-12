@@ -1297,18 +1297,42 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     const claimedAlias = (address: string | null): string | null =>
       address === null ? null : real.discovery.listPeers().find((item) => item.address === address)?.alias ?? null
 
-    // One session at a time (per the budget). A failure in one session never
-    // ends the loop; only a listener-level failure does.
+    // One session at a time (per the budget). The loop never blocks on the
+    // active session: a handshake that arrives while one is running is
+    // rejected fast (channel closed, visible "busy" status) instead of
+    // parking silently in the backlog with no feedback to the sender.
+    // A failure in one session never ends the loop; only a listener-level
+    // failure does.
+    let receiving = false
     const receiveLoop = async (): Promise<void> => {
+      let current: Promise<void> | null = null
       for await (const hs of real.listener.accept()) {
         if (disposed) break
-        try {
-          await track(receiveSession(hs, real, claimedAlias))
-        } catch (error) {
-          state.status = `Receive failed: ${errorText(error)}`
+        if (receiving) {
+          // Busy: close the new channel promptly so the sender learns the
+          // receiver is occupied instead of hanging, and say so on screen.
+          hs.channel.abort()
+          state.status = "Busy — one transfer at a time; try again shortly"
+          logEvent("receive-busy-reject", `rejected handshake from ${remoteAddressOf(hs) ?? "unknown address"}`)
           renderSafely()
+          continue
         }
+        receiving = true
+        current = track(receiveSession(hs, real, claimedAlias))
+          .catch((error: unknown) => {
+            state.status = `Receive failed: ${errorText(error)}`
+            renderSafely()
+          })
+          .finally(() => {
+            receiving = false
+            current = null
+          })
+        // Deliberately not awaited: the loop stays responsive so it can
+        // reject-while-busy. Single-session is enforced by `receiving` above.
       }
+      // dispose() may break the loop mid-session; let it settle so the
+      // inFlight accounting used by dispose() stays correct.
+      await current
     }
     void receiveLoop().catch((error: unknown) => {
       // Listener-level failure: surface it instead of going silently deaf.
