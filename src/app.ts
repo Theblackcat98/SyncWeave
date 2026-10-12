@@ -585,12 +585,18 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       }
       case "transfer-return": returnFromTransfer(); return
       case "queue-retry": {
+        // Mock-only retry flow; the real queue is always empty, but gate it
+        // so a stray record can never open the mock transfer screen.
+        if (mode === "real") return
         const failed = state.transferQueue.find((record) => record.status === "failed" || record.status === "cancelled")
         if (failed) beginTransferRetry(failed.id)
         return
       }
       default:
         if (name.startsWith("favorite-open:")) {
+          // Mock-only screen; unreachable in real mode (favorites are empty
+          // there), but gate defensively like the other mock commands.
+          if (mode === "real") return
           const peerId = name.slice("favorite-open:".length)
           const index = peers.findIndex((item) => item.id === peerId)
           if (index >= 0) state.peerIndex = index
@@ -630,7 +636,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           return
         }
         state.identityStep = 0; setScreen("peer"); return
-      case "p": openFavorites(); return
+      case "p":
+        if (mode === "real") {
+          state.status = "Favorites are not available in real mode"
+          render()
+          return
+        }
+        openFavorites(); return
       case "t": setScreen("queue"); return
       case "?": setScreen("help"); return
       default: return
