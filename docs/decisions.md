@@ -14,11 +14,15 @@ silently deviate from this record; changes need a new recorded decision.
 
 ## 2. Transport and identity
 
-- **Noise_XX_25519_ChaChaPoly_SHA256 over raw TCP**, implemented on
+- **Noise_XX_25519_AESGCM_SHA256 over raw TCP**, implemented on
   `node:crypto` (no libp2p dependency). Rationale: the accepted profile is
   manual-direct with no discovery, so a full libp2p stack adds weight and
-  failure modes without benefit; a minimal Noise_XX implementation is
-  verifiable against the official Noise test vectors.
+  failure modes without benefit. AES-GCM (not ChaChaPoly) because Bun's
+  `node:crypto` provides hardware-backed AES-256-GCM but no ChaCha20-Poly1305;
+  a pure-JS ChaCha20 would be slower and add unaudited code. The
+  implementation is verified against the official Noise test vector for
+  `Noise_XX_25519_AESGCM_SHA256` (snow's vector set), which is stronger
+  evidence than a dependency claim.
   (For reference: LocalSend v2 transfers use HTTPS/TLS over TCP with a
   REST-ish prepare/upload API; SyncWeave uses Noise per the accepted profile
   instead of TLS.)
