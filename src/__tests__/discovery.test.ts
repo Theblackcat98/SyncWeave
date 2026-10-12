@@ -296,3 +296,62 @@ describe("live multicast announce/listen (best effort)", () => {
     expect(errors.join(" ")).not.toMatch(/crash/i)
   }, 10000)
 })
+
+describe("P2-9: 256-peer eviction and onPeersChanged change-semantics", () => {
+  function freshPeerIds(n: number): string[] {
+    return Array.from({ length: n }, () => generateEphemeralIdentity().peerId)
+  }
+
+  test("oldest non-manual entries are evicted first past 256", () => {
+    const svc = withSelf(new DiscoveryService())
+    const ids = freshPeerIds(260)
+    // Stagger lastSeen so eviction order is deterministic: feed in order,
+    // then wait a tick between batches so timestamps differ.
+    for (let i = 0; i < 260; i++) {
+      svc.handleDatagram(
+        buildAnnouncement(`peer-${i}`, ids[i]!, 24816),
+        `192.168.1.${(i % 250) + 1}`,
+      )
+    }
+    const peers = svc.listPeers()
+    expect(peers).toHaveLength(256)
+    const idsNow = new Set(peers.map((p) => p.peerId))
+    // The first four (oldest) were evicted; the rest survived.
+    for (let i = 0; i < 4; i++) expect(idsNow.has(ids[i]!)).toBe(false)
+    for (let i = 4; i < 260; i++) expect(idsNow.has(ids[i]!)).toBe(true)
+  })
+
+  test("manual peers are never evicted by the cap", () => {
+    const svc = withSelf(new DiscoveryService())
+    svc.addManualPeer({ alias: "office", peerId: "manual:office", address: "10.0.0.5", tcpPort: 24816, lastSeen: Date.now() })
+    const ids = freshPeerIds(260)
+    for (let i = 0; i < 260; i++) {
+      svc.handleDatagram(buildAnnouncement(`peer-${i}`, ids[i]!, 24816), "192.168.1.1")
+    }
+    const peers = svc.listPeers()
+    expect(peers.some((p) => p.peerId === "manual:office")).toBe(true)
+    // Manual peer occupies one slot; 255 discovered + 1 manual.
+    expect(peers).toHaveLength(256)
+  })
+
+  test("onPeersChanged fires on add, on change, and never on identical re-announce", () => {
+    const svc = withSelf(new DiscoveryService())
+    let emissions = 0
+    ;(svc as unknown as { events: unknown }).events = {
+      onPeersChanged: (_p: DiscoveredPeer[]) => emissions++,
+    }
+    const id = generateEphemeralIdentity().peerId
+    svc.handleDatagram(buildAnnouncement("nick-laptop", id, 24816), "192.168.1.20")
+    expect(emissions).toBe(1)
+    // Identical re-announcement: no emission (change-semantics hold).
+    svc.handleDatagram(buildAnnouncement("nick-laptop", id, 24816), "192.168.1.20")
+    expect(emissions).toBe(1)
+    // Alias change: emission (surfaces spoofed re-announcements).
+    svc.handleDatagram(buildAnnouncement("renamed", id, 24816), "192.168.1.20")
+    expect(emissions).toBe(2)
+    // Address change: emission.
+    svc.handleDatagram(buildAnnouncement("renamed", id, 24816), "192.168.1.99")
+    expect(emissions).toBe(3)
+    expect(svc.listPeers()).toHaveLength(1)
+  })
+})

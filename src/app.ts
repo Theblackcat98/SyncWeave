@@ -11,6 +11,8 @@ import type { DiscoveryService, DiscoveredPeer } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
 type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
 import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
+import { clamp, stepCursor } from "./cursor.js"
+import { syncDiscoveredPeers } from "./peer-sync.js"
 import { motion } from "./theme.js"
 import { AnimationClock } from "./ui/animation-clock.js"
 import { renderApp } from "./ui/render.js"
@@ -118,7 +120,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         scrollPane(pane, direction) {
           state.activePane = pane
           const max = currentEntries(pane).length - 1
-          state.cursors[pane] = clamp(state.cursors[pane] + (direction === "down" ? 1 : -1), 0, Math.max(0, max))
+          state.cursors[pane] = stepCursor(state.cursors[pane], direction === "down" ? 1 : -1, currentEntries(pane).length)
           keepCursorVisible(pane)
           animateFocus()
           render()
@@ -336,7 +338,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       return
     }
     const entries = currentEntries()
-    state.cursors[state.activePane] = clamp(state.cursors[state.activePane] + delta, 0, Math.max(0, entries.length - 1))
+    state.cursors[state.activePane] = stepCursor(state.cursors[state.activePane], delta, entries.length)
     keepCursorVisible(state.activePane)
     animateFocus()
     render()
@@ -805,26 +807,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function setupRealMode(real: RealTransport): void {
     // Map discovered peers onto the peer-list shape the UI already renders.
     const syncPeers = () => {
-      const discovered: DiscoveredPeer[] = real.discovery.listPeers()
-      const mapped: MockPeer[] = discovered.map((d) => ({
-        id: d.peerId,
-        name: d.alias,
-        host: d.address,
-        port: d.tcpPort,
-        fingerprint: d.peerId,
-        // Manual peers were never probed; discovered peers were seen via
-        // multicast within the expiry window.
-        online: !d.peerId.startsWith("manual:"),
-      }))
-      // listPeers() already includes manual peers (they live in the same
-      // discovery map), so map the full list and dedupe by id — never
-      // re-append the previous array or entries duplicate every tick.
-      const seen = new Set<string>()
-      peers = mapped.filter((p) => {
-        if (seen.has(p.id)) return false
-        seen.add(p.id)
-        return true
-      })
+      // Pure map+dedupe (P2-8): never re-append the previous array or
+      // entries duplicate every tick.
+      peers = syncDiscoveredPeers(real.discovery.listPeers())
       if (state.peerIndex >= peers.length) state.peerIndex = Math.max(0, peers.length - 1)
     }
     const peerTimer = setInterval(() => {
@@ -1119,8 +1104,4 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   }
 
   return { state, render, handleKey, dispose }
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
 }

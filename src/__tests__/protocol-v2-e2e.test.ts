@@ -407,3 +407,53 @@ test("e2e: abort signal cancels an in-flight send", async () => {
     await cleanup(h)
   }
 }, 30_000)
+
+test("e2e: receiver disconnect mid-transfer → sender fails (no hang, no success); receiver surfaces error", async () => {
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "dropped.bin", 4_000_000)
+    const senderIdentity = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+    let killed = false
+
+    const receiverDone = (async () => {
+      const hs = await h.nextChannel()
+      // Wi-Fi drop: abortively kill the receiver's socket mid-transfer.
+      await expect(
+        receiveFiles({
+          channel: hs.channel,
+          handshakeHash: hs.handshakeHash,
+          expectedPeerId: senderIdentity.peerId,
+          identity: receiverIdentity,
+          destinationDirectory: h.destDir,
+          onTransferRequest: async (req) => req.files,
+          onProgress: (_i, _name, receivedBytes) => {
+            if (!killed && receivedBytes > 0) {
+              killed = true
+              hs.channel.abort()
+            }
+          },
+        }),
+      ).rejects.toBeInstanceOf(ReceiveAbortedError)
+    })()
+
+    const sendErr = await sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "dropped.bin" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: senderIdentity,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(killed).toBe(true)
+    // The sender must fail, not hang and not report success.
+    expect(sendErr).toBeInstanceOf(SendAbortedError)
+    const outcomes = (sendErr as SendAbortedError).outcomes
+    expect(outcomes.every((o) => !o.ok)).toBe(true)
+    await receiverDone
+  } finally {
+    await cleanup(h)
+  }
+}, 30_000)
