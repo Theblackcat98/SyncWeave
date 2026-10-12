@@ -26,6 +26,7 @@ export interface RenderData {
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
   actions: RenderActions
+  real?: { bindAddr: string; tcpPort: number } | null
 }
 
 export function renderApp(data: RenderData): void {
@@ -93,6 +94,11 @@ function renderHeader(data: RenderData, width: number, compact: boolean): BoxRen
   const discoveryLabel = data.mode === "real" ? "DISCOVERY" : "MOCK DISCOVERY"
   const peerText = wideHeader ? `  ${frame} ${discoveryLabel} · ${onlineCount} peers` : `  ${frame} ${onlineCount} ${data.mode === "real" ? "peers" : "mock peers"}`
   header.add(label(renderer, "mock-discovery", truncate(peerText, Math.max(12, width - 22)), theme.color.success))
+  if (data.mode === "real" && wideHeader) {
+    const bind = data.real?.bindAddr ?? "::"
+    const port = data.real?.tcpPort ?? 0
+    header.add(label(renderer, "listen-indicator", `  · LISTENING [${bind}]:${port}`, theme.color.muted))
+  }
   if (wideHeader) {
     const activePeer = peers[state.peerIndex % Math.max(1, peers.length)]
     header.add(label(renderer, "active-peer", `  → ${truncate(activePeer?.name ?? "No peer", 18)}`, theme.color.remote))

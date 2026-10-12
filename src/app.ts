@@ -30,6 +30,8 @@ export interface RealTransport {
   aborter: AbortController
   /** Non-fatal startup issue to surface in the TUI (e.g. discovery failed). */
   startupWarning: string | null
+  /** Local bind address, for the listening indicator. */
+  bindAddr: string
 }
 
 export interface AppDependencies {
@@ -101,6 +103,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       peers,
       favorites: peerService.favorites(),
       queue: state.transferQueue,
+      real: mode === "real" && dependencies.real ? { bindAddr: dependencies.real.bindAddr, tcpPort: dependencies.real.tcpPort } : null,
       actions: {
         command,
         selectEntry(pane, index) {

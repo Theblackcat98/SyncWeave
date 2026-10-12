@@ -33,6 +33,7 @@ Modes:
 Flags:
   --alias NAME        Display name announced to peers (default: $USER).
   --port N            TCP port for the Noise listener (default: 24816).
+  --bind ADDR         Local address to bind (default: :: dual-stack IPv4/IPv6).
   --peer HOST:PORT    Manual peer, repeatable. Fallback when multicast
                       discovery is unavailable. IPv6 as --peer [::1]:24816.
   --help, -h          Show this help and exit.
@@ -52,8 +53,8 @@ if (args.includes("--version")) {
 
 // Strict flag parsing: reject unknown --flags and flag values that look
 // like flags (catches typos and misordered arguments).
-const KNOWN_FLAGS = new Set(["--real", "--alias", "--port", "--peer", "--help", "-h", "--version"])
-const FLAGS_WITH_VALUE = new Set(["--alias", "--port", "--peer"])
+const KNOWN_FLAGS = new Set(["--real", "--alias", "--port", "--peer", "--bind", "--help", "-h", "--version"])
+const FLAGS_WITH_VALUE = new Set(["--alias", "--port", "--peer", "--bind"])
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]
   if (!arg.startsWith("--") || arg === "--") continue
@@ -80,6 +81,10 @@ const tcpPort = parseInt(tcpPortRaw, 10)
 if (!Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535) {
   fatal(`invalid --port value "${tcpPortRaw}": expected an integer 1-65535.`)
 }
+// Bind address: default :: (dual-stack IPv4/IPv6). Use 127.0.0.1 or ::1 to
+// keep the listener off the LAN.
+const bindArg = args.indexOf("--bind")
+const bindAddr = bindArg >= 0 && args[bindArg + 1] ? args[bindArg + 1] : "::"
 // Manual peers: --peer 192.168.1.5:24816 (repeatable; IPv6 as [::1]:24816).
 // Fallback when multicast discovery is unavailable; also useful for loopback testing.
 const manualPeers: Array<{ host: string; port: number }> = []
@@ -132,7 +137,7 @@ if (!realMode) {
   const aborter = new AbortController()
   let listener: Awaited<ReturnType<typeof listenNoise>>
   try {
-    listener = await listenNoise({ host: "0.0.0.0", port: tcpPort, signal: aborter.signal })
+    listener = await listenNoise({ host: bindAddr, port: tcpPort, signal: aborter.signal })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (message.includes("EADDRINUSE")) {
@@ -181,6 +186,7 @@ if (!realMode) {
     receiveDirectory,
     aborter,
     startupWarning: discoveryError ? `Discovery failed to start (${discoveryError}); manual --peer entries still work.` : null,
+    bindAddr,
   }
   const app = createSyncWeaveApp(renderer, {
     filesystem: new MockFileSystemService(), // replaced by RealFileSystemService in real mode
