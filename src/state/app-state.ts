@@ -24,6 +24,8 @@ export function createInitialAppState(paths: Record<Pane, string>, reducedMotion
     transferQueue: [],
     activeTransferId: null,
     reducedMotion,
+    sendSasConfirm: null,
+    sending: false,
   }
 }
 

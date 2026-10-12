@@ -664,6 +664,8 @@ export interface SendOptions {
   confirmSas?: (info: { sas: string; peerId: string; signal: AbortSignal }) => Promise<boolean>
   /** Progress callback for UI: (fileIndex, fileName, bytesSent, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesSent: number, fileBytes: number) => void
+  /** Hash-phase progress before dialing (P2-1): (fileIndex, fileCount, fileName). */
+  onHashProgress?: (fileIndex: number, fileCount: number, fileName: string) => void
 }
 
 export interface SendFileOutcome {

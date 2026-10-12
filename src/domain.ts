@@ -97,6 +97,14 @@ export interface AppState {
   transferQueue: TransferRecord[]
   activeTransferId: string | null
   reducedMotion: boolean
+  /**
+   * Real mode: sender-side SAS confirmation prompt (P0-1). Non-null while
+   * the sender must compare `sas` with the receiver's screen before any file
+   * metadata is sent. The app owns the state; render shows it on send-review.
+   */
+  sendSasConfirm: { sas: string; peerFingerprint: string; peerName: string } | null
+  /** Real mode: true while a send is in flight (P0-9). */
+  sending: boolean
 }
 
 export const OTHER_PANE: Record<Pane, Pane> = { local: "remote", remote: "local" }
