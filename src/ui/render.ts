@@ -262,6 +262,24 @@ function renderRemoteStatus(data: RenderData, paneWidth: number, height: number,
   for (const [id, text] of lines) {
     box.add(label(renderer, id, truncate(text, Math.max(10, paneWidth - 4)), theme.color.text))
   }
+  // Peer list: ↑/↓ cycles the send target when this pane is focused.
+  if (peers.length === 0) {
+    box.add(label(renderer, "status-no-peers", truncate("No peers yet · discovering… (or add --peer host:port)", Math.max(10, paneWidth - 4)), theme.color.muted))
+  } else {
+    box.add(label(renderer, "status-peer-hint", truncate(`↑/↓ select target · ${peers.length} peer${peers.length === 1 ? "" : "s"}`, Math.max(10, paneWidth - 4)), theme.color.muted))
+    peers.slice(0, 8).forEach((p, i) => {
+      const selected = i === state.peerIndex % Math.max(1, peers.length)
+      box.add(label(
+        renderer,
+        `status-peer-${i}`,
+        truncate(`${selected ? "▸" : " "} ${p.name}  ${p.host}:${p.port}`, Math.max(10, paneWidth - 4)),
+        selected ? theme.color.focus : theme.color.text,
+      ))
+    })
+    if (peers.length > 8) {
+      box.add(label(renderer, "status-peer-overflow", truncate(`  + ${peers.length - 8} more`, Math.max(10, paneWidth - 4)), theme.color.muted))
+    }
+  }
   box.add(label(renderer, "status-scope-1", truncate("The receiver's files are not shown here.", Math.max(10, paneWidth - 4)), theme.color.muted))
   box.add(label(renderer, "status-scope-2", truncate("Browsing a peer's filesystem is out of scope.", Math.max(10, paneWidth - 4)), theme.color.muted))
   box.add(label(renderer, "status-scope-3", truncate("Each transfer needs the receiver's consent.", Math.max(10, paneWidth - 4)), theme.color.muted))

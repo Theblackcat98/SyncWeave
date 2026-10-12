@@ -306,6 +306,20 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   }
 
   function moveCursor(delta: number): void {
+    // In real mode the Receiver pane is a peer list, not files: ↑/↓ picks
+    // the target peer there.
+    if (mode === "real" && state.activePane === "remote") {
+      if (peers.length > 0) {
+        state.peerIndex = (state.peerIndex + delta + peers.length) % peers.length
+        const p = peers[state.peerIndex]
+        state.status = `Target peer: ${p.name} (${p.host}:${p.port})`
+      } else {
+        state.status = "No peers discovered yet · waiting for announcements or use --peer"
+      }
+      animateFocus()
+      render()
+      return
+    }
     const entries = currentEntries()
     state.cursors[state.activePane] = clamp(state.cursors[state.activePane] + delta, 0, Math.max(0, entries.length - 1))
     keepCursorVisible(state.activePane)
