@@ -26,6 +26,12 @@ export interface MockPeer {
   port: number
   fingerprint: string
   online: boolean
+  /** The alias is self-asserted by a discovery announcement (unverified). */
+  aliasClaimed?: boolean
+  /** Another listed peer has the same alias. */
+  aliasDuplicate?: boolean
+  /** performance.now() of the last alias, address or port change seen for this peer. */
+  changedAt?: number
 }
 
 /** A favorite is only a locally remembered destination; it is not verified trust. */
@@ -97,13 +103,34 @@ export interface AppState {
   transferQueue: TransferRecord[]
   activeTransferId: string | null
   reducedMotion: boolean
+  /**
+   * Real mode: sender-side SAS confirmation prompt (P0-1). Non-null while
+   * the sender must compare `sas` with the receiver's screen before any file
+   * metadata is sent. The app owns the state; render shows it on send-review.
+   */
+  sendSasConfirm: { sas: string; peerFingerprint: string; peerName: string } | null
+  /** Real mode: true while a send is in flight (P0-9). */
+  sending: boolean
 }
 
 export const OTHER_PANE: Record<Pane, Pane> = { local: "remote", remote: "local" }
 
+const SIZE_UNITS = ["KB", "MB", "GB", "TB"] as const
+
+/**
+ * Human-readable size. The unit is chosen after rounding, so 1048575 bytes
+ * reads as "1.0 MB" rather than "1024 KB" (P2-11).
+ */
 export function formatBytes(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
-  if (bytes >= 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
-  return `${bytes} B`
+  if (!Number.isFinite(bytes)) return "unknown"
+  let scaled = Math.max(0, bytes)
+  if (scaled < 1024) return `${Math.round(scaled)} B`
+  let unit = 0
+  scaled /= 1024
+  // Round first: a value that rounds up to 1024 moves to the next unit.
+  while (unit < SIZE_UNITS.length - 1 && Number(scaled.toFixed(unit === 0 ? 0 : 1)) >= 1024) {
+    scaled /= 1024
+    unit += 1
+  }
+  return `${scaled.toFixed(unit === 0 ? 0 : 1)} ${SIZE_UNITS[unit]}`
 }

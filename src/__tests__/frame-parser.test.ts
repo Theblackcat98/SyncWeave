@@ -263,6 +263,39 @@ test("header read timeout fails closed without consuming a body", async () => {
   expect(parser.counters.bodyBytesConsumed).toBe(0)
 })
 
+test("P1-18: readHeader(null) has no parser budget; a per-call number overrides the default", async () => {
+  // A source that yields the header only after a delay (longer than the 20 ms default).
+  const frame = encodeFrame(FrameType.SessionOpen, new Uint8Array([1]), [[ExtensionKey.SessionId, sessionId]])
+  const delayed = (bytes: Uint8Array): ByteSource => {
+    const inner = new ScriptedSource([bytes])
+    return {
+      read: (n: number, signal?: AbortSignal) =>
+        new Promise<Uint8Array | null>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            inner.read(n, signal).then(resolve, reject)
+          }, 60)
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer)
+              reject(new DOMException("aborted", "AbortError"))
+            },
+            { once: true },
+          )
+        }),
+    }
+  }
+  const unbounded = new FrameParser(delayed(frame), { maxBodyLength: 1024, headerTimeoutMs: 20 })
+  const outcome = await unbounded.readHeader(undefined, null)
+  expect(outcome.kind).toBe("header")
+
+  // With a per-call budget shorter than the delay, the same read fails closed.
+  const bounded = new FrameParser(delayed(frame), { maxBodyLength: 1024, headerTimeoutMs: 20 })
+  const rejected = await bounded.readHeader(undefined, 10)
+  expect(rejected.kind).toBe("rejected")
+  expect(bounded.state).toBe("closed")
+})
+
 test("extension section bounds are enforced", async () => {
   // Too many entries.
   const many: Array<[number, Uint8Array]> = []

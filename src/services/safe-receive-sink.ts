@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { link, open, realpath, stat, unlink } from "node:fs/promises"
+import { link, lstat, open, readdir, realpath, stat, unlink } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
@@ -58,6 +58,15 @@ const encoder = new TextEncoder()
 const reservedWindowsNames = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|CLOCK\$|COM[1-9¹²³]|LPT[1-9¹²³])$/i
 const temporaryNamePrefix = ".syncweave-"
 const temporaryNameSuffix = ".partial"
+// Current staging names are `.syncweave-<owner pid>-<uuid>.partial`. Names
+// without a parseable owner pid (legacy) are only swept once they are stale.
+const temporaryNamePattern = /^\.syncweave-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial$/i
+const legacyPartialMaxAgeMs = 60 * 60 * 1000
+
+/** True for any staging file name this sink may leave in a destination. */
+export function isTemporaryPartialName(name: string): boolean {
+  return /^\.syncweave-.*\.partial$/.test(name)
+}
 
 function isReservedWindowsBasename(candidate: string): boolean {
   const deviceName = candidate.split(".", 1)[0]!.replace(/[. ]+$/, "")
@@ -106,13 +115,12 @@ export function sanitizePeerBasename(peerFileName: string, maxNameBytes: number)
     const codePoint = character.codePointAt(0)!
     return codePoint >= 0xd800 && codePoint <= 0xdfff ? "_" : character
   }).join("")
-  candidate = candidate.replace(/[\u0000-\u001f\u007f-\u009f<>:"|?*]/g, "_").trim()
-  // Strip Unicode format characters that misrender filenames: bidi overrides
-  // (U+202A–U+202E, U+2066–U+2069), zero-width joiners/spaces (U+200B–U+200F,
-  // U+FEFF), and line/paragraph separators (U+2028/U+2029). Without this,
-  // "invoice‮fdp.exe" displays as "invoiceexe.pdf" but saves with the
-  // override intact.
-  candidate = candidate.replace(/[\u200b-\u200f\u2028-\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+  candidate = candidate.replace(/[\u0000-\u001f\u007f-\u009f<>:"|?*]/g, "_")
+  // Strip the whole Unicode "Format" category (bidi overrides, isolates,
+  // zero-width joiners and spaces, soft hyphen, BOM, ...) plus line and
+  // paragraph separators. Without this, "invoice\u202Efdp.exe" displays as
+  // "invoiceexe.pdf" but saves with the override intact.
+  candidate = candidate.replace(/\p{Cf}|[\u2028\u2029]/gu, "").trim()
   candidate = candidate.replace(/^\.+/, "").replace(/[. ]+$/, "")
 
   if (candidate.length === 0) {
@@ -129,6 +137,21 @@ export function sanitizePeerBasename(peerFileName: string, maxNameBytes: number)
     throw new TypeError("peerFileName becomes a reserved Windows device name after applying the filename bound")
   }
   return candidate
+}
+
+/**
+ * The basename `receiveToFile` would save for `peerName` before any collision
+ * suffix is added, for consent screens. Returns null when the sink would
+ * reject the name outright (no usable basename, or a reserved device name
+ * after truncation).
+ */
+export function previewSavedName(peerName: string, maxNameBytes = 255): string | null {
+  try {
+    return sanitizePeerBasename(peerName, maxNameBytes)
+  } catch (error) {
+    if (error instanceof TypeError) return null
+    throw error
+  }
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -201,7 +224,7 @@ function closeSourceBestEffort(source: AsyncIterable<Uint8Array>, iterator: Asyn
 async function createExclusiveTemporaryFile(directory: string): Promise<{ path: string; handle: FileHandle }> {
   // randomUUID plus wx means an existing path is never opened or truncated.
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const path = join(directory, `${temporaryNamePrefix}${randomUUID()}${temporaryNameSuffix}`)
+    const path = join(directory, `${temporaryNamePrefix}${process.pid}-${randomUUID()}${temporaryNameSuffix}`)
     try {
       return { path, handle: await open(path, "wx", 0o600) }
     } catch (error) {
@@ -263,6 +286,8 @@ export async function receiveToFile(
   let sourceDone = false
   let operationError: unknown
   let bytesReceived = 0
+  let published = false
+  let temporaryRemoved = false
   const hasher = createHash("sha256")
   const expectedSha256 = options.expectedSha256.toLowerCase()
 
@@ -311,11 +336,15 @@ export async function receiveToFile(
     // No await separates this check from the publication syscall, so an abort
     // observed before finalization cannot publish even verified bytes.
     await link(temporaryPath, finalPath)
+    // From here on the verified file is at its final name. Nothing below may
+    // turn this into a reported failure, and no cleanup may remove the final name.
+    published = true
     try {
       await unlink(temporaryPath)
+      temporaryRemoved = true
     } catch {
-      // The file is published and verified; a failed temp cleanup must not
-      // delete it. The orphaned temp file is swept at the next startup.
+      // Best effort: the `finally` block retries once. A leftover temp file is
+      // swept at the next startup.
     }
     // Fsync the directory so a crash can't lose a file we reported as
     // received. Best effort: not all filesystems support it.
@@ -344,10 +373,14 @@ export async function receiveToFile(
         cleanupErrors.push(error)
       }
     }
-    try {
-      await unlink(temporaryPath)
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT") cleanupErrors.push(error)
+    if (!temporaryRemoved) {
+      try {
+        await unlink(temporaryPath)
+      } catch (error) {
+        // After publication the verified file is the result; a leftover temp
+        // name is not a receive failure.
+        if (!published && errorCode(error) !== "ENOENT") cleanupErrors.push(error)
+      }
     }
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
@@ -359,4 +392,57 @@ export async function receiveToFile(
       )
     }
   }
+}
+
+/** True when `pid` names a live process (EPERM still means it exists). */
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return errorCode(error) === "EPERM"
+  }
+}
+
+/**
+ * A staging file is an orphan when its owner pid is gone. Names without a
+ * parseable owner (legacy) are orphans only once they are stale.
+ */
+async function isOrphanPartial(name: string, path: string): Promise<boolean> {
+  const owner = temporaryNamePattern.exec(name)
+  if (owner) return !processIsAlive(Number(owner[1]))
+  try {
+    const info = await lstat(path)
+    return Date.now() - info.mtimeMs > legacyPartialMaxAgeMs
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Remove orphaned `.syncweave-*.partial` staging files left in `directory` by
+ * killed sessions. A partial whose owner pid is still alive (this process or
+ * another running instance) is never removed; legacy names without an owner
+ * pid are removed only after an hour without modification. Returns the number
+ * removed.
+ */
+export async function sweepOrphanPartials(directory: string): Promise<number> {
+  let swept = 0
+  try {
+    for (const name of await readdir(directory)) {
+      if (!isTemporaryPartialName(name)) continue
+      const path = join(directory, name)
+      try {
+        if (!(await isOrphanPartial(name, path))) continue
+        await unlink(path)
+        swept++
+      } catch {
+        /* best effort */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+  return swept
 }

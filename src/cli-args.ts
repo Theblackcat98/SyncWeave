@@ -1,9 +1,18 @@
 /**
  * CLI argument parsing for SyncWeave. Extracted from main.ts so it can be
- * unit-tested (P1-46). All validation errors throw CliError with a message
- * suitable for stderr; main.ts catches and exits.
+ * unit-tested (P1-46). Every usage problem throws a UsageError (exit code 2)
+ * with a message suitable for stderr; main.ts catches and exits.
  */
+import { randomBytes } from "node:crypto"
+import { isIP } from "node:net"
+import { isTruthyFlag } from "./state/app-state.js"
+
 export class CliError extends Error {}
+
+/** A bad command line: main.ts prints the message and exits with `exitCode`. */
+export class UsageError extends CliError {
+  readonly exitCode = 2
+}
 
 export interface ManualPeer {
   host: string
@@ -15,93 +24,175 @@ export interface CliOptions {
   alias: string
   tcpPort: number
   bindAddr: string
+  /** True when --bind was given. An explicit bind never falls back (D4). */
+  bindExplicit: boolean
+  /** Start directory for the Local pane (--root); null means the home folder. */
+  rootDir: string | null
   manualPeers: ManualPeer[]
-  /** Non-fatal warnings (e.g. skipped --peer values) for stderr. */
-  warnings: string[]
   showHelp: boolean
   showVersion: boolean
 }
 
-const KNOWN_FLAGS = new Set(["--real", "--alias", "--port", "--peer", "--bind", "--help", "-h", "--version"])
-const FLAGS_WITH_VALUE = new Set(["--alias", "--port", "--peer", "--bind"])
+const DEFAULT_PORT = 24816
+const MAX_ALIAS_CHARS = 64
+const VALUE_FLAGS = new Set(["--alias", "--port", "--peer", "--bind", "--root"])
 
-export function parseArgs(args: string[], env: Record<string, string | undefined> = {}): CliOptions {
-  const showHelp = args.includes("--help") || args.includes("-h")
-  const showVersion = args.includes("--version")
+/** Random per-run suffix for the default alias ("syncweave-XXXX"). Never $USER. */
+function randomAliasSuffix(): string {
+  return randomBytes(2).toString("hex")
+}
+
+function parsePort(raw: string, context: string): number {
+  if (!/^\d+$/.test(raw)) {
+    throw new UsageError(`invalid ${context} "${raw}": expected an integer 1-65535.`)
+  }
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new UsageError(`invalid ${context} "${raw}": expected an integer 1-65535.`)
+  }
+  return port
+}
+
+/** `--peer` accepts IP literals only: `1.2.3.4`, `1.2.3.4:24816`, `[::1]:24816`. */
+function parsePeerSpec(spec: string): ManualPeer {
+  let host: string
+  let portRaw: string | undefined
+  const bracketed = spec.match(/^\[([^\]]+)\](?::(.*))?$/)
+  if (bracketed) {
+    host = bracketed[1]!
+    portRaw = bracketed[2]
+  } else {
+    const colons = spec.split(":").length - 1
+    if (colons > 1) {
+      throw new UsageError(`invalid --peer "${spec}": wrap IPv6 addresses in brackets, e.g. --peer [::1]:24816.`)
+    }
+    const idx = spec.indexOf(":")
+    if (idx >= 0) {
+      host = spec.slice(0, idx)
+      portRaw = spec.slice(idx + 1)
+    } else {
+      host = spec
+    }
+  }
+  if (!isIP(host)) {
+    throw new UsageError(`invalid --peer "${spec}": the host must be an IP address (e.g. 192.168.1.5 or [::1]:24816), not a name.`)
+  }
+  const port = portRaw === undefined ? DEFAULT_PORT : parsePort(portRaw, `port in --peer "${spec}"`)
+  return { host, port }
+}
+
+export function parseArgs(
+  args: string[],
+  env: Record<string, string | undefined> = {},
+  makeAliasSuffix: () => string = randomAliasSuffix,
+): CliOptions {
+  const values = new Map<string, string>()
+  const peerSpecs: string[] = []
+  let realFlag: boolean | undefined
+  let showHelp = false
+  let showVersion = false
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    if (arg === "-h") {
+      showHelp = true
+      continue
+    }
+    if (!arg.startsWith("--")) {
+      throw new UsageError(`unexpected argument "${arg}". Run with --help for usage.`)
+    }
+    const eq = arg.indexOf("=")
+    const name = eq >= 0 ? arg.slice(0, eq) : arg
+    const inline = eq >= 0 ? arg.slice(eq + 1) : undefined
+
+    if (name === "--help") {
+      showHelp = true
+      continue
+    }
+    if (name === "--version") {
+      showVersion = true
+      continue
+    }
+    if (name === "--real") {
+      if (inline === undefined) {
+        realFlag = true
+      } else if (isTruthyFlag(inline)) {
+        realFlag = true
+      } else if (["0", "false", "no", "off"].includes(inline.trim().toLowerCase())) {
+        realFlag = false
+      } else {
+        throw new UsageError(`invalid --real value "${inline}": use --real, or --real=0 / --real=1.`)
+      }
+      continue
+    }
+    if (!VALUE_FLAGS.has(name)) {
+      throw new UsageError(`unknown flag "${name}". Run with --help for usage.`)
+    }
+    let value = inline
+    if (value === undefined) {
+      const next = args[i + 1]
+      if (next === undefined || next.startsWith("--") || next === "-h") {
+        throw new UsageError(`flag "${name}" requires a value. Run with --help for usage.`)
+      }
+      value = next
+      i++
+    }
+    if (value === "") {
+      throw new UsageError(`flag "${name}" requires a value. Run with --help for usage.`)
+    }
+    if (name === "--peer") peerSpecs.push(value)
+    else values.set(name, value)
+  }
+
+  const realMode = realFlag ?? (env.SYNCWEAVE_MODE !== undefined
+    && (env.SYNCWEAVE_MODE.trim().toLowerCase() === "real" || isTruthyFlag(env.SYNCWEAVE_MODE)))
+
   if (showHelp || showVersion) {
     return {
-      realMode: false,
-      alias: env.USER ?? "syncweave",
-      tcpPort: 24816,
+      realMode,
+      alias: "syncweave",
+      tcpPort: DEFAULT_PORT,
       bindAddr: "::",
+      bindExplicit: false,
+      rootDir: null,
       manualPeers: [],
-      warnings: [],
       showHelp,
       showVersion,
     }
   }
 
-  // Strict flag parsing: reject unknown --flags and flag values that look
-  // like flags (catches typos and misordered arguments).
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!
-    if (!arg.startsWith("--") || arg === "--") continue
-    const name = arg.split("=")[0]!
-    if (!KNOWN_FLAGS.has(name)) {
-      throw new CliError(`unknown flag "${arg}". Run with --help for usage.`)
+  const aliasRaw = values.get("--alias")
+  let alias: string
+  if (aliasRaw !== undefined) {
+    alias = aliasRaw.trim()
+    if (alias.length === 0 || alias.length > MAX_ALIAS_CHARS || /[\u0000-\u001f\u007f]/.test(alias)) {
+      throw new UsageError(`invalid --alias "${aliasRaw}": use 1-${MAX_ALIAS_CHARS} printable characters.`)
     }
-    if (FLAGS_WITH_VALUE.has(name)) {
-      const inline = arg.includes("=")
-      const next = args[i + 1]
-      if (!inline && (!next || next.startsWith("--"))) {
-        throw new CliError(`flag "${name}" requires a value. Run with --help for usage.`)
-      }
-    }
+  } else {
+    alias = `syncweave-${makeAliasSuffix()}`
   }
 
-  const realMode = args.includes("--real") || env.SYNCWEAVE_MODE === "real"
-  const aliasArg = args.indexOf("--alias")
-  const alias = aliasArg >= 0 && args[aliasArg + 1] ? args[aliasArg + 1]! : (env.USER ?? "syncweave")
-  const portArg = args.indexOf("--port")
-  const tcpPortRaw = portArg >= 0 && args[portArg + 1] ? args[portArg + 1]! : "24816"
-  const tcpPort = parseInt(tcpPortRaw, 10)
-  if (!Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535) {
-    throw new CliError(`invalid --port value "${tcpPortRaw}": expected an integer 1-65535.`)
-  }
-  const bindArg = args.indexOf("--bind")
-  const bindAddr = bindArg >= 0 && args[bindArg + 1] ? args[bindArg + 1]! : "::"
+  const tcpPort = parsePort(values.get("--port") ?? String(DEFAULT_PORT), "--port value")
 
-  const manualPeers: ManualPeer[] = []
-  const warnings: string[] = []
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--peer" && args[i + 1]) {
-      const spec = args[i + 1]!
-      let host: string | undefined
-      let portStr: string | undefined
-      const bracketed = spec.match(/^\[([^\]]+)\](?::(\d+))?$/)
-      if (bracketed) {
-        host = bracketed[1]
-        portStr = bracketed[2]
-      } else if ((spec.match(/:/g) ?? []).length > 1) {
-        warnings.push(`invalid --peer value "${spec}": wrap IPv6 addresses in brackets, e.g. --peer [::1]:24816. Skipping.`)
-        continue
-      } else {
-        const idx = spec.lastIndexOf(":")
-        if (idx >= 0) {
-          host = spec.slice(0, idx)
-          portStr = spec.slice(idx + 1)
-        } else {
-          host = spec
-        }
-      }
-      const port = portStr ? parseInt(portStr, 10) : 24816
-      if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
-        warnings.push(`invalid --peer value "${spec}": expected host[:port] with port 1-65535. Skipping.`)
-        continue
-      }
-      manualPeers.push({ host, port })
-    }
+  const bindRaw = values.get("--bind")
+  const bindAddr = bindRaw ?? "::"
+
+  const rootDir = values.get("--root") ?? null
+  if (rootDir !== null && /[\u0000-\u001f\u007f]/.test(rootDir)) {
+    throw new UsageError(`invalid --root "${rootDir}": control characters are not allowed.`)
   }
 
-  return { realMode, alias, tcpPort, bindAddr, manualPeers, warnings, showHelp: false, showVersion: false }
+  const manualPeers = peerSpecs.map(parsePeerSpec)
+
+  return {
+    realMode,
+    alias,
+    tcpPort,
+    bindAddr,
+    bindExplicit: bindRaw !== undefined,
+    rootDir,
+    manualPeers,
+    showHelp: false,
+    showVersion: false,
+  }
 }

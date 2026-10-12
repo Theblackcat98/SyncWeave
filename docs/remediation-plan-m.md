@@ -1,5 +1,12 @@
 # SyncWeave remediation plan — path to production-ready
 
+> **Superseded; IDs collide with `docs/remediation-plan.md`, which is canonical.**
+> This plan (the "-m" plan, dated 2026-10-11) uses the same P0-x, P1-x and P2-x IDs as
+> `docs/remediation-plan.md` for different items. Use `docs/remediation-plan.md` and
+> `docs/remediation-verification.md` for status. Commit messages and code comments
+> that cite `P2-11`, `P2-4` to `P2-10` or similar IDs may refer to this plan's
+> numbering. Check the context before you act on them.
+
 Written 2026-10-11 after two review rounds (8 subagent sweeps total):
 round 1 covered the network/security core, discovery, app wiring, and UI/docs;
 round 2 covered mock leftovers, operational hardening, test gaps, and

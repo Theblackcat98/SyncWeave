@@ -1,10 +1,12 @@
 # SyncWeave — Phase 1: TUI & UX Foundation
 
+> **HISTORICAL — archived 2026-10-12.** This is the Phase 1 record (mock UI and UX), kept for reference. Its statements that nothing is implemented for real networking, such as "No real network transfer is implemented", describe Phase 1 only and are out of date. Real-mode transfers, Noise transport and UDP discovery are on `main`. For the current state see [docs/networking.md](../networking.md), [docs/decisions.md](../decisions.md) and [README.md](../../README.md).
+
 > **Goal:** make SyncWeave feel like a polished product before implementing real networking or synchronization. Everything in this phase is mocked.
 
 ## Locked architecture
 
-**OpenTUI + TypeScript is the sole UI stack.** Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework. OpenTUI is the native Zig terminal UI core with TypeScript bindings and component/layout primitives. The upstream project also provides its own documentation/agent skill and should be consulted when an unfamiliar API is needed. urlOpenTUI repositoryhttps://github.com/anomalyco/opentui
+**OpenTUI + TypeScript is the sole UI stack.** Do not introduce Bubble Tea, Lip Gloss, Ratatui, or another TUI framework. OpenTUI is the native Zig terminal UI core with TypeScript bindings and component/layout primitives. The upstream project also provides its own documentation/agent skill and should be consulted when an unfamiliar API is needed. [OpenTUI repository](https://github.com/anomalyco/opentui)
 
 ### Phase 1 stack
 
@@ -202,7 +204,7 @@ Current scenario:
 
 ## 8. Mock Transfer Experience
 
-**No real network transfer is implemented.**
+**No real network transfer is implemented in Phase 1.** (Historical: superseded by the Phase 2 real mode.)
 
 - [x] Mock transfer state machine: idle → transferring → complete.
 - [x] Transfer screen/modal.

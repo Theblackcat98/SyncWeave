@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 import { resetLogPathForTests } from "../services/diagnostic-log.js"
@@ -7,6 +7,7 @@ import {
   addDestination,
   cycleDestinationIndex,
   loadDestinations,
+  loadDestinationsDetailed,
   removeDestination,
   saveDestinations,
   validateDestinationPath,
@@ -44,16 +45,24 @@ test("loadDestinations: non-array JSON → default only", async () => {
 })
 
 test("loadDestinations: default always first, duplicates dropped, junk filtered", async () => {
+  const other = await mkdtemp(join(tmpdir(), "sw-dest-other-"))
+  const third = await mkdtemp(join(tmpdir(), "sw-dest-third-"))
   await writeFile(
     join(stateHome, "syncweave", "destinations.json"),
-    JSON.stringify(["/tmp/other", DEFAULT, "/tmp/other", 42, null, "", "/tmp/third"]),
+    JSON.stringify([other, DEFAULT, other, 42, null, "", third]),
   )
-  expect(loadDestinations(DEFAULT)).toEqual([DEFAULT, "/tmp/other", "/tmp/third"])
+  expect(loadDestinations(DEFAULT)).toEqual([DEFAULT, other, third])
+  await rm(other, { recursive: true, force: true })
+  await rm(third, { recursive: true, force: true })
 })
 
-test("saveDestinations round-trips through loadDestinations", () => {
-  saveDestinations([DEFAULT, "/tmp/a", "/tmp/b"])
-  expect(loadDestinations(DEFAULT)).toEqual([DEFAULT, "/tmp/a", "/tmp/b"])
+test("saveDestinations round-trips through loadDestinations", async () => {
+  const a = await mkdtemp(join(tmpdir(), "sw-dest-a-"))
+  const b = await mkdtemp(join(tmpdir(), "sw-dest-b-"))
+  saveDestinations([DEFAULT, a, b])
+  expect(loadDestinations(DEFAULT)).toEqual([DEFAULT, a, b])
+  await rm(a, { recursive: true, force: true })
+  await rm(b, { recursive: true, force: true })
 })
 
 test("validateDestinationPath: empty and control chars rejected", () => {
@@ -62,22 +71,38 @@ test("validateDestinationPath: empty and control chars rejected", () => {
   expect(validateDestinationPath("/tmp/a\u001bb").ok).toBe(false)
 })
 
-test("validateDestinationPath: existing dir accepted, missing dir created", async () => {
+test("validateDestinationPath: existing dir accepted; missing dir is not created without the create flag", async () => {
   const existing = await mkdtemp(join(tmpdir(), "sw-dest-"))
   const ok = validateDestinationPath(existing)
   expect(ok.ok).toBe(true)
   if (ok.ok) expect(ok.dir).toBe(existing)
 
   const missing = join(stateHome, "new", "nested", "dir")
-  const created = validateDestinationPath(missing)
-  expect(created.ok).toBe(true)
-  if (created.ok) {
-    expect(created.dir).toBe(missing)
-    // Created with mode 0700 like ~/Downloads.
-    const { stat } = await import("node:fs/promises")
-    expect((await stat(missing)).isDirectory()).toBe(true)
-  }
+  const refused = validateDestinationPath(missing)
+  expect(refused.ok).toBe(false)
+  if (!refused.ok) expect(refused.reason).toMatch(/does not exist/)
+  await expect(stat(missing)).rejects.toThrow()
   await rm(existing, { recursive: true, force: true })
+})
+
+test("validateDestinationPath: create flag only creates directories under $HOME", async () => {
+  const missing = join(stateHome, "new")
+  const refused = validateDestinationPath(missing, { create: true })
+  expect(refused.ok).toBe(false)
+  if (!refused.ok) expect(refused.reason).toMatch(/under your home directory/)
+  await expect(stat(missing)).rejects.toThrow()
+
+  const underHome = join(homedir(), `syncweave-dest-test-${process.pid}-${Date.now()}`)
+  try {
+    const created = validateDestinationPath(underHome, { create: true })
+    expect(created.ok).toBe(true)
+    if (created.ok) {
+      expect(created.dir).toBe(underHome)
+      expect((await stat(underHome)).isDirectory()).toBe(true)
+    }
+  } finally {
+    await rm(underHome, { recursive: true, force: true })
+  }
 })
 
 test("validateDestinationPath: file (not dir) rejected", async () => {
@@ -126,10 +151,28 @@ test("cycleDestinationIndex: wraps around, empty list safe", () => {
 })
 
 test("persistence survives a corrupt-then-save cycle", async () => {
+  const keep = await mkdtemp(join(tmpdir(), "sw-dest-keep-"))
   await writeFile(join(stateHome, "syncweave", "destinations.json"), "garbage")
   expect(loadDestinations(DEFAULT)).toEqual([DEFAULT])
-  saveDestinations([DEFAULT, "/tmp/keep"])
-  expect(loadDestinations(DEFAULT)).toEqual([DEFAULT, "/tmp/keep"])
+  saveDestinations([DEFAULT, keep])
+  expect(loadDestinations(DEFAULT)).toEqual([DEFAULT, keep])
   const raw = await readFile(join(stateHome, "syncweave", "destinations.json"), "utf8")
-  expect(JSON.parse(raw)).toEqual([DEFAULT, "/tmp/keep"])
+  expect(JSON.parse(raw)).toEqual([DEFAULT, keep])
+  await rm(keep, { recursive: true, force: true })
+})
+
+test("loadDestinations drops persisted entries that no longer validate, with a reason", async () => {
+  const valid = await mkdtemp(join(tmpdir(), "sw-dest-valid-"))
+  const gone = join(tmpdir(), `sw-dest-gone-${process.pid}-${Date.now()}`)
+  await writeFile(
+    join(stateHome, "syncweave", "destinations.json"),
+    JSON.stringify([gone, "/etc", "relative/dir", valid]),
+  )
+  const loaded = loadDestinationsDetailed(DEFAULT)
+  expect(loaded.dests).toEqual([DEFAULT, valid])
+  expect(loaded.dropped.map((entry) => entry.path)).toEqual([gone, "/etc", "relative/dir"])
+  expect(loaded.dropped[0]!.reason).toMatch(/does not exist/)
+  expect(loaded.dropped[1]!.reason).toMatch(/system directory/)
+  expect(loaded.dropped[2]!.reason).toMatch(/absolute/)
+  await rm(valid, { recursive: true, force: true })
 })

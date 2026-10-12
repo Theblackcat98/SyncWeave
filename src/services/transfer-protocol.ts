@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, getRandomValues, sign, verify } from "node:crypto"
-import { promises as fs } from "node:fs"
+import { constants as fsConstants, promises as fs, type Stats } from "node:fs"
 import { type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
 import {
@@ -81,6 +81,22 @@ const CHUNK_BYTES = 65535 - 16 - 8 - 37
 const TRANSFER_TOKEN_BYTES = 16
 /** How long the sender waits for each FILE_RESULT / SESSION_RESULT (P0-2). */
 const RESULT_TIMEOUT_MS = 60_000
+/** Receiver consent window: how long the prompt may stay open (P0-3). */
+const CONSENT_TIMEOUT_MS = 60_000
+/**
+ * Sender wait for TRANSFER_ACCEPT (R2): the receiver may hold the prompt for
+ * the whole consent window, so the wait is that window plus a margin.
+ */
+const ACCEPT_TIMEOUT_MS = CONSENT_TIMEOUT_MS + 15_000
+/** Silent-peer deadline for each identity-proof reply (P0-3). */
+const HANDSHAKE_TIMEOUT_MS = 15_000
+/**
+ * Receiver wait for TRANSFER_REQUEST. The sender confirms the SAS before it
+ * sends metadata (P0-1), so this covers a human comparing two screens.
+ */
+const REQUEST_TIMEOUT_MS = 120_000
+/** Per-frame idle budget while a file streams (receiver side). */
+const FRAME_IDLE_TIMEOUT_MS = 15_000
 
 /**
  * Per-frame-type body caps (P0-6), enforced by the parser on the header
@@ -279,6 +295,9 @@ export function verifyProof(
  * also use it only once. A reused identity fails closed here.
  */
 const claimedIdentities = new Set<string>()
+/** Bound on remembered claims (N8). Identities are random per session, so an
+ *  evicted claim cannot be presented again by accident. */
+const CLAIMED_IDENTITY_LIMIT = 1024
 function claimIdentity(identity: EphemeralIdentity): void {
   if (claimedIdentities.has(identity.peerId)) {
     throw new Error(
@@ -286,6 +305,10 @@ function claimIdentity(identity: EphemeralIdentity): void {
     )
   }
   claimedIdentities.add(identity.peerId)
+  if (claimedIdentities.size > CLAIMED_IDENTITY_LIMIT) {
+    const oldest = claimedIdentities.values().next().value
+    if (oldest !== undefined) claimedIdentities.delete(oldest)
+  }
 }
 
 function parseJsonBody(body: Uint8Array, what: string): unknown {
@@ -441,11 +464,32 @@ export function validateSignalBody(body: unknown, what: string): asserts body is
   }
 }
 
-/** The receiver explicitly declined (P1-9). */
+/** The receiver explicitly declined (P1-9). `code` is the DECLINE code, e.g. E_CONSENT_TIMEOUT. */
 export class TransferDeclinedError extends Error {
-  constructor(message = "transfer declined") {
+  constructor(
+    message = "transfer declined",
+    readonly code?: string,
+  ) {
     super(message)
     this.name = "TransferDeclinedError"
+  }
+}
+
+/** The receiver's consent window ended without an answer (P1-9). Sent to the
+ *  sender as DECLINE with code E_CONSENT_TIMEOUT, not as ERROR. */
+export class ConsentTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`consent timed out after ${timeoutMs}ms: no answer on this device`)
+    this.name = "ConsentTimeoutError"
+  }
+}
+
+/** The sender did not confirm the SAS (P0-1). A CANCEL was sent before any
+ *  file metadata, so the receiver never shows a consent prompt. */
+export class SasRejectedError extends Error {
+  constructor(readonly sas: string) {
+    super(`SAS ${sas} was not confirmed: transfer cancelled before any file metadata was sent`)
+    this.name = "SasRejectedError"
   }
 }
 
@@ -498,17 +542,19 @@ export class ReceiveAbortedError extends Error {
 }
 
 /**
- * Read one frame and enforce the v2 wire bindings: the SessionId
- * extension must equal our transcript-derived session id on EVERY frame
- * (P1-12), and peer-initiated teardown frames are translated into typed
- * errors (P1-9, P1-10) instead of "unexpected frame" failures.
+ * Read one frame and enforce the v2 wire bindings: the SessionId extension
+ * must equal our transcript-derived session id on EVERY frame (P1-12), and
+ * peer-initiated teardown frames are translated into typed errors (P1-9,
+ * P1-10) instead of "unexpected frame" failures. `headerTimeoutMs` overrides
+ * the parser's per-header budget; `null` leaves the deadline to the caller.
  */
 async function readFrame(
   parser: FrameParser,
   sessionId: Uint8Array,
   signal?: AbortSignal,
+  headerTimeoutMs?: number | null,
 ): Promise<{ header: FrameHeader; body: Uint8Array }> {
-  const outcome = await parser.readHeader(signal)
+  const outcome = await parser.readHeader(signal, headerTimeoutMs)
   if (outcome.kind === "eof") {
     throw new Error("peer closed the session")
   }
@@ -536,28 +582,172 @@ async function readFrame(
     validateSignalBody(raw, "decline")
     throw new TransferDeclinedError(
       `transfer declined by receiver${raw.reason ? `: ${raw.reason}` : ""}`,
+      raw.code,
     )
   }
   return { header, body }
 }
 
-/** Resolve a collision-free destination name: `name (1).ext`, `name (2).ext`, … */
-async function resolveDestination(directory: string, peerFileName: string): Promise<string> {
-  const safe = sanitizePeerBasename(peerFileName, APP_MAX_NAME_BYTES)
-  const dot = safe.lastIndexOf(".")
-  const stem = dot > 0 ? safe.slice(0, dot) : safe
-  const ext = dot > 0 ? safe.slice(dot) : ""
-  for (let i = 0; ; i++) {
-    const candidate = i === 0 ? safe : `${stem} (${i})${ext}`
-    try {
-      await fs.access(join(directory, candidate))
-    } catch {
-      return candidate // does not exist: usable
+/**
+ * The single reader of one session's frames after the handshake (P1-10, R12,
+ * D3). At most one read is outstanding. Waits race a deadline and an abort
+ * against that read, but never cancel it, so a timed-out wait cannot consume
+ * and drop a frame. `watch()` lets a sender that is busy writing, or a
+ * receiver whose prompt is open, fail at once on the peer's CANCEL/ERROR or a
+ * closed channel.
+ */
+interface InboundFrame {
+  header: FrameHeader
+  body: Uint8Array
+}
+
+class FrameInbox {
+  private pending: Promise<InboundFrame> | null = null
+
+  constructor(
+    private readonly parser: FrameParser,
+    private readonly sessionId: Uint8Array,
+    private readonly signal?: AbortSignal,
+  ) {}
+
+  /** The outstanding read, started if none is in flight. Its failure is
+   *  handled here, so an unobserved read error is never unhandled. */
+  private arm(): Promise<InboundFrame> {
+    if (this.pending === null) {
+      const read = readFrame(this.parser, this.sessionId, this.signal, null)
+      read.catch(() => undefined)
+      this.pending = read
     }
-    if (i > 9999) {
-      throw new Error("too many name collisions")
-    }
+    return this.pending
   }
+
+  /** Next frame, or a rejection on timeout, abort, or a failed read. */
+  async next(timeoutMs: number | null, what: string, signal?: AbortSignal): Promise<InboundFrame> {
+    const frame = await withDeadline(this.arm(), timeoutMs, what, signal)
+    this.pending = null
+    return frame
+  }
+
+  /** Never resolves. Rejects as soon as the peer sends anything (a CANCEL or
+   *  ERROR is rethrown as its typed error) or the channel fails. */
+  watch(): Promise<never> {
+    const unexpected = this.arm().then((frame) => {
+      throw new Error(`unexpected frame 0x${frame.header.type.toString(16)} from peer`)
+    })
+    unexpected.catch(() => undefined)
+    return unexpected
+  }
+}
+
+/**
+ * Race `promise` against an optional deadline and an optional abort. Neither
+ * settles the underlying promise: a late result stays with its owner.
+ */
+function withDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number | null,
+  what: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (timeoutMs === null && signal === undefined) return promise
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = (): void => {
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+    }
+    const onAbort = (): void => {
+      if (settled) return
+      finish()
+      reject(signal?.reason ?? new Error("aborted"))
+    }
+    promise.then(
+      (value) => {
+        if (settled) return
+        finish()
+        resolve(value)
+      },
+      (error: unknown) => {
+        if (settled) return
+        finish()
+        reject(error)
+      },
+    )
+    if (timeoutMs !== null) {
+      timer = setTimeout(() => {
+        if (settled) return
+        finish()
+        reject(new Error(`timed out after ${timeoutMs}ms waiting for ${what}`))
+      }, timeoutMs)
+    }
+    if (signal !== undefined) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener("abort", onAbort, { once: true })
+    }
+  })
+}
+
+/** Await a write while the peer's teardown is watched (R12): the first to settle decides. */
+function guardWrite(write: Promise<void>, peerGone: Promise<never>, signal?: AbortSignal): Promise<void> {
+  return withDeadline(Promise.race([write, peerGone]), null, "the write", signal)
+}
+
+/** Progress values shown to the user are whole numbers within [0, total] (P2-12). */
+function clampProgress(value: number, total: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(Math.max(Math.floor(value), 0), total)
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength
+}
+
+/** Longest prefix of `value` whose UTF-8 encoding is at most `maxBytes`. */
+function truncateToBytes(value: string, maxBytes: number): string {
+  let used = 0
+  let out = ""
+  for (const character of value) {
+    const bytes = utf8Length(character)
+    if (used + bytes > maxBytes) break
+    out += character
+    used += bytes
+  }
+  return out
+}
+
+/** A candidate name is free only when lstat reports ENOENT. A dangling
+ *  symlink is found by lstat and is therefore taken (P1-20). */
+async function isFreeName(path: string): Promise<boolean> {
+  try {
+    await fs.lstat(path)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code === "ENOENT"
+  }
+}
+
+/**
+ * Resolve a collision-free destination leaf name: `name.ext`, then
+ * `name (1).ext`, `name (2).ext`, ... (P1-20).
+ *  - The stem is cut to a byte budget so the whole candidate fits the
+ *    255-byte limit; the " (n).ext" suffix is never cut.
+ *  - Existence is checked with lstat: any entry, including a dangling
+ *    symlink, is taken, and only ENOENT means the name is free.
+ */
+export async function resolveDestination(directory: string, peerFileName: string): Promise<string> {
+  const safe = sanitizePeerBasename(peerFileName, APP_MAX_NAME_BYTES)
+  if (await isFreeName(join(directory, safe))) return safe
+  const dot = safe.lastIndexOf(".")
+  const ext = dot > 0 && utf8Length(safe.slice(dot)) <= 32 ? safe.slice(dot) : ""
+  const stem = ext ? safe.slice(0, dot) : safe
+  for (let i = 1; i <= 9999; i++) {
+    const suffix = ` (${i})${ext}`
+    const candidate = truncateToBytes(stem, APP_MAX_NAME_BYTES - utf8Length(suffix)) + suffix
+    if (await isFreeName(join(directory, candidate))) return candidate
+  }
+  throw new Error("too many name collisions")
 }
 
 /**
@@ -566,13 +756,15 @@ async function resolveDestination(directory: string, peerFileName: string): Prom
  * replace-between-open (open TOCTOU) cannot make the hash and the later
  * stream disagree about which file they read. Modification *between* the
  * hash pass and the stream pass is caught by the receiver's SHA-256
- * verification, which is the integrity backstop.
+ * verification, which is the integrity backstop. The signal is checked per
+ * 128 KiB read, so a cancel during hashing is honoured (R7).
  */
-async function hashFileHandle(handle: FileHandle, size: number): Promise<string> {
+async function hashFileHandle(handle: FileHandle, size: number, signal?: AbortSignal): Promise<string> {
   const hash = createHash("sha256")
   const buf = Buffer.alloc(128 * 1024)
   let offset = 0
   while (offset < size) {
+    signal?.throwIfAborted()
     const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, size - offset), offset)
     if (bytesRead === 0) {
       throw new Error("file changed while reading")
@@ -591,16 +783,67 @@ interface FileSnapshot {
   sha256: string
 }
 
-/** Open once, fstat for the size snapshot, hash through the same fd. */
-async function snapshotFile(path: string, name: string): Promise<FileSnapshot> {
-  const handle = await fs.open(path, "r")
+function nonRegularReason(st: Stats): string {
+  if (st.isDirectory()) return "it is a directory"
+  if (st.isFIFO()) return "it is a named pipe"
+  if (st.isSocket()) return "it is a socket"
+  if (st.isCharacterDevice() || st.isBlockDevice()) return "it is a device"
+  return "it is not a regular file"
+}
+
+/**
+ * Stat every source before any byte is hashed (P0-11): the count, each
+ * file's type and size, and the session total are checked first, so a FIFO,
+ * a directory or an oversize file is refused without being read.
+ */
+async function checkSendSources(
+  sources: ReadonlyArray<{ path: string; name: string }>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (sources.length === 0 || sources.length > BUDGET_MAX_FILES) {
+    throw new Error(`file count must be 1-${BUDGET_MAX_FILES}`)
+  }
+  let total = 0
+  for (const source of sources) {
+    signal?.throwIfAborted()
+    const st = await fs.stat(source.path)
+    if (!st.isFile()) {
+      throw new Error(`cannot send ${source.name}: ${nonRegularReason(st)}`)
+    }
+    if (st.size > BUDGET_MAX_FILE_BYTES) {
+      throw new Error(`send: file too large: ${source.name}`)
+    }
+    total += st.size
+    if (total > BUDGET_MAX_SESSION_BYTES) {
+      throw new Error("send: session total exceeds 10 GiB")
+    }
+  }
+}
+
+/**
+ * Open once, fstat, hash through the same fd. O_NONBLOCK means a FIFO that
+ * replaced the file after the stat cannot block the open (P0-11); fstat then
+ * refuses anything that is not a regular file.
+ */
+async function snapshotFile(
+  source: { path: string; name: string },
+  index: number,
+  count: number,
+  signal?: AbortSignal,
+  onHashProgress?: (fileIndex: number, fileCount: number, fileName: string) => void,
+): Promise<FileSnapshot> {
+  const handle = await fs.open(source.path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
   try {
     const st = await handle.stat()
     if (!st.isFile()) {
-      throw new Error(`not a regular file: ${name}`)
+      throw new Error(`cannot send ${source.name}: ${nonRegularReason(st)}`)
     }
-    const sha256 = await hashFileHandle(handle, st.size)
-    return { handle, path, name, bytes: st.size, sha256 }
+    if (st.size > BUDGET_MAX_FILE_BYTES) {
+      throw new Error(`send: file too large: ${source.name}`)
+    }
+    onHashProgress?.(index, count, source.name)
+    const sha256 = await hashFileHandle(handle, st.size, signal)
+    return { handle, path: source.path, name: source.name, bytes: st.size, sha256 }
   } catch (error) {
     await handle.close()
     throw error
@@ -615,18 +858,12 @@ function jsonBytes(value: unknown): Uint8Array {
   return Buffer.from(JSON.stringify(value), "utf8")
 }
 
-/** Timeout-bounded signal for awaiting FILE_RESULT / SESSION_RESULT (P0-2):
- *  a receiver that goes silent after FILE_END fails the send instead of
- *  hanging it. */
-function resultSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(RESULT_TIMEOUT_MS)
-  return signal ? AbortSignal.any([signal, timeout]) : timeout
-}
-
 /** Map a receive-side failure to a wire error code (P0-2). */
 function receiveErrorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code
   if (code === "ENOSPC") return "E_NOSPC"
+  // The name was taken between resolveDestination and the sink's link (P1-20).
+  if (code === "EEXIST") return "E_EXISTS"
   const message = error instanceof Error ? error.message : String(error)
   if (/sha-256|digest/i.test(message)) return "E_HASH_MISMATCH"
   if (/exceed|too large|limit/i.test(message)) return "E_LIMIT"
@@ -654,8 +891,27 @@ export interface SendOptions {
    */
   identity?: EphemeralIdentity
   signal?: AbortSignal
+  /**
+   * Sender-side SAS gate (P0-1 / D1). Called after the receiver's identity proof
+   * verifies and BEFORE any file metadata (TRANSFER_REQUEST) is sent. The UI
+   * shows `sas` (and `peerId`) and resolves true only when the user confirms
+   * it matches the receiver's screen. Resolving anything but true sends CANCEL
+   * and throws SasRejectedError. `signal` aborts on a local abort, when the
+   * peer sends CANCEL/ERROR, or when the channel closes. If omitted, no
+   * sender-side confirmation is performed (tests).
+   */
+  confirmSas?: (info: { sas: string; peerId: string; signal: AbortSignal }) => Promise<boolean>
   /** Progress callback for UI: (fileIndex, fileName, bytesSent, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesSent: number, fileBytes: number) => void
+  /** Hash-phase progress before dialing (P2-1): (fileIndex, fileCount, fileName). */
+  onHashProgress?: (fileIndex: number, fileCount: number, fileName: string) => void
+  /**
+   * How long to wait for TRANSFER_ACCEPT. Defaults to the receiver's consent
+   * window plus a margin (R2). Tests may shorten it.
+   */
+  acceptTimeoutMs?: number
+  /** How long to wait for each FILE_RESULT and for SESSION_RESULT. Defaults to 60 s (P0-2). */
+  resultTimeoutMs?: number
 }
 
 export interface SendFileOutcome {
@@ -678,26 +934,33 @@ export interface SendResult {
   sas: string
 }
 
-/** Sender side: dial, handshake, Gate B, Gate C, stream files, collect results. */
+/** Sender side: dial, handshake, SAS gate, Gate B, Gate C, stream files, collect results. */
 export async function sendFiles(options: SendOptions): Promise<SendResult> {
   const { host, port, signal } = options
   const expectedPeerId = options.expectedPeerId
-  if (options.files.length === 0 || options.files.length > BUDGET_MAX_FILES) {
-    throw new Error(`file count must be 1-${BUDGET_MAX_FILES}`)
-  }
+  const acceptTimeoutMs = options.acceptTimeoutMs ?? ACCEPT_TIMEOUT_MS
+  const resultTimeoutMs = options.resultTimeoutMs ?? RESULT_TIMEOUT_MS
+  // P0-11: count, type, size and budget are checked before any byte is hashed.
+  await checkSendSources(options.files, signal)
   // Single-fd snapshots (P0-2): open once, fstat, hash through the same fd.
   const snapshots: FileSnapshot[] = []
-  try {
-    for (const f of options.files) {
-      snapshots.push(await snapshotFile(f.path, f.name))
-    }
-  } catch (error) {
+  const closeSnapshots = async (): Promise<void> => {
     for (const s of snapshots) {
       try {
         await s.handle.close()
       } catch {
         /* ignore */
       }
+    }
+  }
+  try {
+    for (const [index, source] of options.files.entries()) {
+      snapshots.push(await snapshotFile(source, index, options.files.length, signal, options.onHashProgress))
+    }
+  } catch (error) {
+    await closeSnapshots()
+    if (signal?.aborted) {
+      throw new SendAbortedError("send cancelled before connecting", [])
     }
     throw error
   }
@@ -710,13 +973,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
   try {
     enforceBudgets(files, "send")
   } catch (error) {
-    for (const s of snapshots) {
-      try {
-        await s.handle.close()
-      } catch {
-        /* ignore */
-      }
-    }
+    await closeSnapshots()
     throw error
   }
 
@@ -724,13 +981,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
   try {
     claimIdentity(identity)
   } catch (error) {
-    for (const s of snapshots) {
-      try {
-        await s.handle.close()
-      } catch {
-        /* ignore */
-      }
-    }
+    await closeSnapshots()
     throw error
   }
   const sessions = new SessionManager()
@@ -750,8 +1001,8 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     const session = sessions.createSession("sender", sessionId)
 
     // Gate B, local side: the user provided the expected Peer ID out of band,
-    // or (TOFU mode) their act of choosing this peer and sending is the
-    // confirmation, recorded after the peer's proof verifies below.
+    // or (no expected ID: the normal real-mode path) the user's SAS
+    // confirmation below is the local confirmation. Nothing is pinned.
     if (expectedPeerId !== undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
     }
@@ -759,9 +1010,10 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     const parser = new FrameParser(channel.asByteSource(signal), {
       maxBodyLength: 64 * 1024,
       maxBodyLengthByType: BODY_CAPS_V2,
-      headerTimeoutMs: 15_000,
+      headerTimeoutMs: HANDSHAKE_TIMEOUT_MS,
       bodyTimeoutMs: 60_000,
     })
+    const inbox = new FrameInbox(parser, session.id, signal)
     const sendFrame = (
       type: FrameType,
       body: Uint8Array,
@@ -777,7 +1029,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
 
     // 2. Await the receiver's IDENTITY_CONFIRM and verify their proof.
     parser.transitionTo("awaiting-confirm")
-    const confirm = await readFrame(parser, session.id, signal)
+    const confirm = await inbox.next(HANDSHAKE_TIMEOUT_MS, "the receiver's identity proof", signal)
     if (confirm.header.type !== FrameType.IdentityConfirm) {
       throw new Error("expected identity confirmation")
     }
@@ -789,14 +1041,39 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     })
     const verifiedIdentity = new TextEncoder().encode(verifiedPeerId)
     sessions.recordIdentityConfirmation(session.id, "remote", verifiedIdentity)
+
+    // 3. SAS gate (P0-1 / D1): nothing about the files leaves until the user
+    //    confirms that the SAS matches the receiver's screen. The gate's
+    //    signal ends when the peer sends CANCEL/ERROR or the channel closes.
+    if (options.confirmSas) {
+      const gateAbort = new AbortController()
+      const peerGone = inbox.watch()
+      peerGone.catch((error: unknown) => gateAbort.abort(error))
+      const gateSignal = signal ? AbortSignal.any([signal, gateAbort.signal]) : gateAbort.signal
+      const approved = await withDeadline(
+        Promise.race([options.confirmSas({ sas, peerId: verifiedPeerId, signal: gateSignal }), peerGone]),
+        null,
+        "SAS confirmation",
+        signal,
+      )
+      if (approved !== true) {
+        await sendFrame(
+          FrameType.Cancel,
+          jsonBytes({ code: "sas-rejected", reason: "sender did not confirm the SAS" }),
+          extSessionId(session.id),
+        )
+        throw new SasRejectedError(sas)
+      }
+    }
     if (expectedPeerId === undefined) {
-      // TOFU mode: the user's send action confirms this verified identity.
+      // No expected ID: the confirmed SAS (or the send action, without a gate) is the local confirmation.
       sessions.recordIdentityConfirmation(session.id, "local", verifiedIdentity)
     }
 
-    // 3. Gate B complete: authorize and send the transfer request (metadata only).
+    // 4. Gate B complete: authorize and send the transfer request (metadata only).
     const auth = sessions.authorizeTransfer(session.id, files)
     const requestId = createHash("sha256").update(auth.token).digest().subarray(0, 16)
+    parser.transitionTo("awaiting-accept")
     await sendFrame(
       FrameType.TransferRequest,
       jsonBytes({ v: PROTOCOL_VERSION, files }),
@@ -806,9 +1083,8 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
       ]),
     )
 
-    // 4. Gate C: the receiver's explicit acceptance, BY REQUEST INDEX (P0-7).
-    parser.transitionTo("awaiting-accept")
-    const accept = await readFrame(parser, session.id, signal)
+    // 5. Gate C: the receiver's explicit acceptance, BY REQUEST INDEX (P0-7).
+    const accept = await inbox.next(acceptTimeoutMs, "the receiver's decision", signal)
     if (accept.header.type !== FrameType.TransferAccept) {
       throw new Error("expected transfer acceptance")
     }
@@ -840,7 +1116,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     }
     parser.transitionTo("sending")
 
-    // 5. Stream each accepted file, then await its FILE_RESULT (P0-2).
+    // 6. Stream each accepted file, then await its FILE_RESULT (P0-2).
     //    Success is reported ONLY on a matching acknowledgement; a close
     //    before the result, or a timeout, is a failure.
     let fileNumber = 0
@@ -874,10 +1150,13 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
       }
       try {
         options.onProgress?.(fileNumber, file.name, 0, file.bytes)
-        await sendFrame(
-          FrameType.FileHeader,
-          jsonBytes({ name: file.name, bytes: file.bytes, sha256: file.sha256 }),
-          headerExt,
+        // While this file streams, the receiver's CANCEL/ERROR (or a closed
+        // channel) ends the send at once with the peer's reason (R12).
+        const peerGone = inbox.watch()
+        await guardWrite(
+          sendFrame(FrameType.FileHeader, jsonBytes({ name: file.name, bytes: file.bytes, sha256: file.sha256 }), headerExt),
+          peerGone,
+          signal,
         )
         const chunkBuf = Buffer.alloc(CHUNK_BYTES)
         let sentBytes = 0
@@ -888,12 +1167,16 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
           if (bytesRead === 0) {
             throw new Error(`file shrank during send: ${file.name}`)
           }
-          await sendFrame(FrameType.FileChunk, chunkBuf.subarray(0, bytesRead), fileExt)
+          await guardWrite(
+            sendFrame(FrameType.FileChunk, chunkBuf.subarray(0, bytesRead), fileExt),
+            peerGone,
+            signal,
+          )
           sentBytes += bytesRead
-          options.onProgress?.(fileNumber, file.name, sentBytes, file.bytes)
+          options.onProgress?.(fileNumber, file.name, clampProgress(sentBytes, file.bytes), file.bytes)
         }
         await sendFrame(FrameType.FileEnd, jsonBytes({ sha256: file.sha256 }), fileExt)
-        const result = await readFrame(parser, session.id, resultSignal(signal))
+        const result = await inbox.next(resultTimeoutMs, `the receiver's result for ${file.name}`, signal)
         if (result.header.type !== FrameType.FileResult) {
           throw new Error("expected file result")
         }
@@ -901,6 +1184,10 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
         validateFileResultBody(resultRaw)
         if (resultRaw.index !== fileNumber) {
           throw new Error("file result: index mismatch")
+        }
+        // P0-2: a success acknowledgement must describe the bytes we sent.
+        if (resultRaw.ok && (resultRaw.bytes !== file.bytes || resultRaw.sha256 !== file.sha256)) {
+          throw new Error(`receiver acknowledged different content for ${file.name}`)
         }
         outcome.ok = resultRaw.ok
         outcome.finalName = resultRaw.finalName
@@ -922,9 +1209,8 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
       fileNumber++
     }
 
-    // 6. Final session result (P0-2), then done. No waitForPeerClose: the
-    //    explicit SESSION_RESULT is the acknowledgement.
-    const sessionResult = await readFrame(parser, session.id, resultSignal(signal))
+    // 7. Final session result (P0-2), then done.
+    const sessionResult = await inbox.next(resultTimeoutMs, "the receiver's final result", signal)
     if (sessionResult.header.type !== FrameType.SessionResult) {
       throw new Error("expected session result")
     }
@@ -935,11 +1221,13 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     }
     return { outcomes, verifiedPeerId, sas }
   } catch (error) {
-    const peerInitiated =
+    // Errors the peer or the SAS gate already signalled need no teardown frame.
+    const signalled =
       error instanceof TransferDeclinedError ||
       error instanceof PeerCancelledError ||
-      error instanceof PeerSignalledError
-    if (!peerInitiated && channel !== null && sessionId !== null && !channel.isClosed) {
+      error instanceof PeerSignalledError ||
+      error instanceof SasRejectedError
+    if (!signalled && channel !== null && sessionId !== null && !channel.isClosed) {
       // Best-effort teardown signal on local abort/failure (P1-10).
       try {
         const type = signal?.aborted ? FrameType.Cancel : FrameType.Error
@@ -955,7 +1243,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
         /* best effort */
       }
     }
-    if (error instanceof SendAbortedError || peerInitiated) {
+    if (error instanceof SendAbortedError || signalled) {
       throw error
     }
     throw new SendAbortedError(error instanceof Error ? error.message : String(error), outcomes)
@@ -963,13 +1251,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     if (sessionId !== null) {
       sessions.destroySession(sessionId)
     }
-    for (const s of snapshots) {
-      try {
-        await s.handle.close()
-      } catch {
-        /* ignore */
-      }
-    }
+    await closeSnapshots()
     channel?.close()
   }
 }
@@ -998,8 +1280,19 @@ export interface ReceiveOptions {
    */
   onTransferRequest: (request: {
     peerId: string
+    /**
+     * Requested files. Return a subset of THESE object references: acceptance
+     * is mapped back to request indices by reference (identical files in one
+     * request must remain distinguishable).
+     */
     files: ProtocolFile[]
     sas: string
+    /**
+     * Aborts when the consent window ends without an answer: sender
+     * disconnect/cancel, consent deadline, or local abort. The UI must tear
+     * down its prompt when this fires.
+     */
+    signal: AbortSignal
   }) => Promise<ProtocolFile[]>
   /**
    * Inject a pre-generated identity (tests). Generated fresh if omitted.
@@ -1010,9 +1303,14 @@ export interface ReceiveOptions {
   /**
    * Consent deadline in milliseconds. Defaults to 60s: a peer that
    * handshakes then goes silent must not hold the receiver's prompt
-   * forever. Expiry declines the transfer with E_CONSENT_TIMEOUT.
+   * forever. Expiry sends DECLINE with code E_CONSENT_TIMEOUT (P1-9).
    */
   consentTimeoutMs?: number
+  /**
+   * How long to wait for the sender's TRANSFER_REQUEST after the identity
+   * exchange. Defaults to 120s, which covers the sender's SAS confirmation.
+   */
+  requestTimeoutMs?: number
   /** Progress callback for UI: (fileIndex, fileName, bytesReceived, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => void
 }
@@ -1024,6 +1322,11 @@ export interface ReceiveResult {
   sas: string
 }
 
+/** Two entries describe the same file when name, size and digest all match. */
+function sameFile(a: ProtocolFile, b: ProtocolFile): boolean {
+  return a.name === b.name && a.bytes === b.bytes && a.sha256 === b.sha256
+}
+
 /** Receiver side: verify, Gate B, present request, Gate C, receive, acknowledge. */
 export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResult> {
   const { channel, handshakeHash, onTransferRequest, signal } = options
@@ -1031,7 +1334,13 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
   const destDir = () =>
     typeof options.destinationDirectory === "function" ? options.destinationDirectory() : options.destinationDirectory
   const identity = options.identity ?? generateEphemeralIdentity()
-  claimIdentity(identity)
+  try {
+    claimIdentity(identity)
+  } catch (error) {
+    // N8: a claim failure must not leave the accepted channel open.
+    channel.close()
+    throw error
+  }
   const sessions = new SessionManager()
   const sessionId = sessionIdFromHandshakeHash(handshakeHash)
   const sas = sasFromHandshakeHash(handshakeHash)
@@ -1045,9 +1354,10 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
   const parser = new FrameParser(channel.asByteSource(signal), {
     maxBodyLength: 64 * 1024,
     maxBodyLengthByType: BODY_CAPS_V2,
-    headerTimeoutMs: 15_000,
+    headerTimeoutMs: HANDSHAKE_TIMEOUT_MS,
     bodyTimeoutMs: 60_000,
   })
+  const inbox = new FrameInbox(parser, session.id, signal)
   const sendFrame = (
     type: FrameType,
     body: Uint8Array,
@@ -1069,7 +1379,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
 
   try {
     // 1. SESSION_OPEN: verify the sender's v2 identity proof before anything else.
-    const open = await readFrame(parser, session.id, signal)
+    const open = await inbox.next(HANDSHAKE_TIMEOUT_MS, "the sender's identity proof", signal)
     if (open.header.type !== FrameType.SessionOpen) {
       throw new Error("expected session open")
     }
@@ -1081,8 +1391,8 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     })
     const senderIdentity = new TextEncoder().encode(verifiedSenderId)
     // Gate B, local side: with an out-of-band expected ID it was provided up
-    // front; in TOFU mode the user's accept action in onTransferRequest is
-    // the local confirmation, recorded after they approve.
+    // front; otherwise the user's accept action in onTransferRequest (after
+    // comparing the SAS) is the local confirmation, recorded after they approve.
     if (options.expectedPeerId !== undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(options.expectedPeerId))
     }
@@ -1090,15 +1400,15 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     parser.transitionTo("handshake")
 
     // 2. IDENTITY_CONFIRM with our own v2 proof.
+    parser.transitionTo("identity-confirmed")
     await sendFrame(
       FrameType.IdentityConfirm,
       jsonBytes(signProof(identity, handshakeHash, "receiver")),
       extSessionId(session.id),
     )
-    parser.transitionTo("identity-confirmed")
 
     // 3. TRANSFER_REQUEST: metadata only, no bytes flow yet.
-    const request = await readFrame(parser, session.id, signal)
+    const request = await inbox.next(options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS, "the transfer request", signal)
     if (request.header.type !== FrameType.TransferRequest) {
       throw new Error("expected transfer request")
     }
@@ -1119,32 +1429,42 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     parser.transitionTo("request-review")
 
     // 4. Gate C: the user's explicit, separate acceptance of the exact set.
-    // Consent deadline: a peer that handshakes then goes silent must not
-    // hold the receiver's prompt forever. Expiry declines the transfer.
+    //    The prompt's signal ends on the consent deadline, a local abort, or
+    //    anything the sender does while the prompt is open (D3): a CANCEL, an
+    //    ERROR, a protocol violation or a closed channel.
+    const consentMs = options.consentTimeoutMs ?? CONSENT_TIMEOUT_MS
+    const consent = new AbortController()
+    const consentTimer = setTimeout(() => consent.abort(new ConsentTimeoutError(consentMs)), consentMs)
+    const onLocalAbort = (): void => consent.abort(signal?.reason ?? new Error("aborted"))
+    if (signal?.aborted) onLocalAbort()
+    else signal?.addEventListener("abort", onLocalAbort, { once: true })
+    let consentOpen = true
+    const senderGone = inbox.watch()
+    senderGone.catch((error: unknown) => {
+      if (consentOpen) consent.abort(error)
+    })
     let accepted: ProtocolFile[]
     try {
-      const consentDeadlineMs = options.consentTimeoutMs ?? 60_000
-      const consentDeadline = new AbortController()
-      const consentTimer = setTimeout(() => {
-        consentDeadline.abort(new Error(`consent timed out after ${consentDeadlineMs}ms: sender went silent`))
-      }, consentDeadlineMs)
-      try {
-        accepted = await Promise.race([
-          onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas }),
-          new Promise<never>((_, reject) => {
-            consentDeadline.signal.addEventListener("abort", () => reject(consentDeadline.signal.reason), { once: true })
-          }),
-        ])
-      } finally {
-        clearTimeout(consentTimer)
-      }
-    } catch (error) {
-      await signalPeer(
-        FrameType.Error,
-        "E_CONSENT_FAILED",
-        error instanceof Error ? error.message : String(error),
+      accepted = await withDeadline(
+        Promise.resolve().then(() =>
+          onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas, signal: consent.signal }),
+        ),
+        null,
+        "the receiver's consent",
+        consent.signal,
       )
+    } catch (error) {
+      if (error instanceof ConsentTimeoutError) {
+        await signalPeer(FrameType.Decline, "E_CONSENT_TIMEOUT", error.message)
+      }
       throw error
+    } finally {
+      consentOpen = false
+      clearTimeout(consentTimer)
+      signal?.removeEventListener("abort", onLocalAbort)
+    }
+    if (!Array.isArray(accepted)) {
+      throw new Error("consent: onTransferRequest must resolve to a list of files")
     }
     if (options.expectedPeerId === undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", senderIdentity)
@@ -1156,20 +1476,23 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
         jsonBytes({ code: "declined", reason: "declined by user" }),
         extSessionId(session.id),
       )
-      throw new TransferDeclinedError("transfer declined by user")
+      throw new TransferDeclinedError("transfer declined by user", "declined")
     }
     const auth = sessions.authorizeTransfer(session.id, requestFiles)
-    // Map the accepted subset to REQUEST INDICES (P0-7): the wire carries
-    // indices only, so a malicious receiver cannot make the sender
-    // re-stream by repeating entries — duplicates are rejected here.
+    // Map the accepted subset to REQUEST INDICES (P0-7). D2: an entry is
+    // matched by object reference, so identical files in one request stay
+    // distinct. A copy falls back to a content match only when exactly one
+    // request entry has that content.
     const seen = new Set<number>()
     const acceptedIndices: number[] = []
     for (const f of accepted) {
-      const i = requestFiles.findIndex(
-        (r) => r.name === f.name && r.bytes === f.bytes && r.sha256 === f.sha256,
-      )
+      let i = requestFiles.indexOf(f)
       if (i < 0) {
-        throw new Error("accepted file was not in the request")
+        const matches = requestFiles.flatMap((r, index) => (sameFile(r, f) ? [index] : []))
+        if (matches.length !== 1) {
+          throw new Error("accepted file was not in the request (return the request's own entries)")
+        }
+        i = matches[0]!
       }
       if (seen.has(i)) {
         throw new Error("duplicate accepted file")
@@ -1186,6 +1509,8 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     // binding the file stream to this Gate C decision.
     const transferToken = new Uint8Array(TRANSFER_TOKEN_BYTES)
     getRandomValues(transferToken)
+    // The state moves first, so the sender's first file frame is parsed in "receiving".
+    parser.transitionTo("receiving")
     await sendFrame(
       FrameType.TransferAccept,
       jsonBytes({
@@ -1197,13 +1522,12 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
         [ExtensionKey.RequestId, requestId],
       ]),
     )
-    parser.transitionTo("receiving")
 
     // 5. Receive each file into the safe sink, acknowledging each one
     //    with FILE_RESULT — including failures with error codes (P0-2).
     let fileNumber = 0
     for (const file of acceptedTransfer.acceptedFiles) {
-      const header = await readFrame(parser, session.id, signal)
+      const header = await inbox.next(FRAME_IDLE_TIMEOUT_MS, "the next file header", signal)
       if (header.header.type !== FrameType.FileHeader) {
         throw new Error("expected file header")
       }
@@ -1232,7 +1556,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
       async function* chunks(): AsyncGenerator<Uint8Array> {
         let receivedBytes = 0
         for (;;) {
-          const frame = await readFrame(parser, session.id, signal)
+          const frame = await inbox.next(FRAME_IDLE_TIMEOUT_MS, `data for ${file.name}`, signal)
           if (frame.header.type === FrameType.FileEnd) {
             const endRaw: unknown = parseJsonBody(frame.body, "file end")
             validateSha256Body(endRaw)
@@ -1250,7 +1574,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
             throw new Error("chunk for wrong file")
           }
           receivedBytes += frame.body.length
-          options.onProgress?.(fileNumber, file.name, receivedBytes, file.bytes)
+          options.onProgress?.(fileNumber, file.name, clampProgress(receivedBytes, file.bytes), file.bytes)
           yield frame.body
         }
       }
@@ -1311,11 +1635,13 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     )
     return { files: received, verifiedPeerId: verifiedSenderId, sas }
   } catch (error) {
-    const peerInitiated =
+    // Errors the peer or the consent deadline already signalled need no teardown frame.
+    const signalled =
       error instanceof TransferDeclinedError ||
       error instanceof PeerCancelledError ||
-      error instanceof PeerSignalledError
-    if (!peerInitiated && !channel.isClosed) {
+      error instanceof PeerSignalledError ||
+      error instanceof ConsentTimeoutError
+    if (!signalled && !channel.isClosed) {
       // Best-effort teardown signal on local abort/failure (P1-10).
       try {
         const type = signal?.aborted ? FrameType.Cancel : FrameType.Error
@@ -1331,7 +1657,7 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
         /* best effort */
       }
     }
-    if (error instanceof ReceiveAbortedError || peerInitiated) {
+    if (error instanceof ReceiveAbortedError || signalled) {
       throw error
     }
     throw new ReceiveAbortedError(error instanceof Error ? error.message : String(error), received)

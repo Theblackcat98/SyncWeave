@@ -7,6 +7,7 @@ import {
   DISCOVERY_PROTOCOL_VERSION,
   type DiscoveredPeer,
   DiscoveryService,
+  MAX_PEERS_PER_SOURCE,
   parseAnnouncement,
   PEER_EXPIRY_MS,
 } from "../services/discovery.js"
@@ -229,10 +230,10 @@ describe("DiscoveryService peer tracking (via handleDatagram seam)", () => {
     svc.handleDatagram(validDatagram(), "192.168.1.20")
     expect(svc.listPeers()).toHaveLength(1)
     // Still fresh just before the deadline.
-    svc.sweepExpired(Date.now() + PEER_EXPIRY_MS - 1000)
+    svc.sweepExpired(performance.now() + PEER_EXPIRY_MS - 1000)
     expect(svc.listPeers()).toHaveLength(1)
     // Gone after the deadline, with a change emission.
-    svc.sweepExpired(Date.now() + PEER_EXPIRY_MS + 1)
+    svc.sweepExpired(performance.now() + PEER_EXPIRY_MS + 1)
     expect(svc.listPeers()).toEqual([])
     expect(seen.at(-1)).toEqual([])
     expect(PEER_EXPIRY_MS).toBe(15000)
@@ -250,83 +251,99 @@ describe("DiscoveryService peer tracking (via handleDatagram seam)", () => {
   })
 })
 
-describe("live multicast announce/listen (best effort)", () => {
-  test("a listener sees a raw announcement, or the environment skips", async () => {
-    const svc = new DiscoveryService()
-    const errors: string[] = []
-    let started = false
-    try {
-      await svc.start({
-        alias: "listener",
-        peerId: PEER_SELF,
-        tcpPort: 24816,
-        discoveryPort: 24981,
-        events: { onError: (e) => errors.push(e.message) },
-      })
-      started = true
-    } catch (e) {
-      console.log(`SKIP live discovery: cannot bind (${(e as Error).message})`)
-      return
-    }
-    try {
-      // Send one announcement from an ephemeral socket straight at the group.
-      const sender = await Bun.udpSocket({ port: 0 })
-      let sent = false
-      try {
-        sender.send(buildAnnouncement("sender", PEER_B, 24816), 24981, DISCOVERY_MULTICAST_GROUP)
-        sent = true
-      } catch (e) {
-        console.log(`SKIP live discovery: multicast send blocked (${(e as Error).message})`)
-      } finally {
-        sender.close()
-      }
-      if (!sent) return
-      const deadline = Date.now() + 2500
-      while (Date.now() < deadline && svc.listPeers().length === 0) {
-        await new Promise((r) => setTimeout(r, 100))
-      }
-      if (svc.listPeers().length === 0) {
-        console.log("SKIP live discovery: no multicast delivery in this environment")
-        return
-      }
-      expect(svc.listPeers()[0]).toMatchObject({ peerId: PEER_B, alias: "sender", tcpPort: 24816 })
-    } finally {
-      if (started) svc.stop()
-    }
-    expect(errors.join(" ")).not.toMatch(/crash/i)
-  }, 10000)
-})
 
-describe("P2-9: 256-peer eviction and onPeersChanged change-semantics", () => {
+/** One live multicast probe, run once at collection time so skips are reported by bun test. */
+type LiveProbe = { ok: true; peer: DiscoveredPeer; errors: string[] } | { ok: false; reason: string }
+
+async function probeLiveMulticast(port: number): Promise<LiveProbe> {
+  const svc = new DiscoveryService()
+  const errors: string[] = []
+  try {
+    await svc.start({
+      alias: "listener",
+      peerId: PEER_SELF,
+      tcpPort: 24816,
+      discoveryPort: port,
+      events: { onError: (e) => errors.push(e.message) },
+    })
+  } catch (e) {
+    return { ok: false, reason: `cannot bind: ${(e as Error).message}` }
+  }
+  try {
+    // Send one announcement from an ephemeral socket straight at the group.
+    const sender = await Bun.udpSocket({ port: 0 })
+    try {
+      sender.send(buildAnnouncement("sender", PEER_B, 24816), port, DISCOVERY_MULTICAST_GROUP)
+    } catch (e) {
+      return { ok: false, reason: `multicast send blocked: ${(e as Error).message}` }
+    } finally {
+      sender.close()
+    }
+    const deadline = performance.now() + 2500
+    while (performance.now() < deadline && svc.listPeers().length === 0) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    const [peer] = svc.listPeers()
+    if (!peer) {
+      return { ok: false, reason: `no multicast delivery in this environment${errors.length ? ` (${errors.join("; ")})` : ""}` }
+    }
+    return { ok: true, peer, errors }
+  } finally {
+    svc.stop()
+  }
+}
+
+// P2-21: the live test is a real skip when multicast is unavailable, and a
+// failure when SYNCWEAVE_REQUIRE_MULTICAST=1 (CI must not silently pass).
+const requireMulticast = process.env["SYNCWEAVE_REQUIRE_MULTICAST"] === "1"
+const live = await probeLiveMulticast(24981)
+if (!live.ok) {
+  console.log(`SKIP live multicast announce/listen: ${live.reason}`)
+}
+if (!live.ok && requireMulticast) {
+  test("live multicast delivery is available (SYNCWEAVE_REQUIRE_MULTICAST=1)", () => {
+    throw new Error(`multicast required but unavailable: ${live.reason}`)
+  })
+}
+test.skipIf(!live.ok)(
+  "live multicast: a listener receives a raw announcement",
+  () => {
+    if (!live.ok) return
+    expect(live.errors.join(" ")).not.toMatch(/crash/i)
+    expect(live.peer).toMatchObject({ peerId: PEER_B, alias: "sender", tcpPort: 24816 })
+  },
+  10000,
+)
+
+describe("P2-9: full-table policy and onPeersChanged change-semantics", () => {
   function freshPeerIds(n: number): string[] {
     return Array.from({ length: n }, () => generateEphemeralIdentity().peerId)
   }
 
-  test("oldest non-manual entries are evicted first past 256", () => {
+  test("a full table of live entries drops newcomers and never evicts a live entry", () => {
     const svc = withSelf(new DiscoveryService())
+    // 256 live peers spread across 64 source addresses (4 each, within the per-source cap).
     const ids = freshPeerIds(260)
-    // Stagger lastSeen so eviction order is deterministic: feed in order,
-    // then wait a tick between batches so timestamps differ.
-    for (let i = 0; i < 260; i++) {
-      svc.handleDatagram(
-        buildAnnouncement(`peer-${i}`, ids[i]!, 24816),
-        `192.168.1.${(i % 250) + 1}`,
-      )
+    for (let i = 0; i < 256; i++) {
+      svc.handleDatagram(buildAnnouncement(`peer-${i}`, ids[i]!, 24816), `192.168.2.${(i % 64) + 1}`)
     }
-    const peers = svc.listPeers()
-    expect(peers).toHaveLength(256)
-    const idsNow = new Set(peers.map((p) => p.peerId))
-    // The first four (oldest) were evicted; the rest survived.
-    for (let i = 0; i < 4; i++) expect(idsNow.has(ids[i]!)).toBe(false)
-    for (let i = 4; i < 260; i++) expect(idsNow.has(ids[i]!)).toBe(true)
+    expect(svc.listPeers()).toHaveLength(256)
+    // Newcomers from fresh sources are dropped; the live entries stay.
+    for (let i = 256; i < 260; i++) {
+      svc.handleDatagram(buildAnnouncement(`peer-${i}`, ids[i]!, 24816), `10.9.9.${i}`)
+    }
+    const idsNow = new Set(svc.listPeers().map((p) => p.peerId))
+    expect(idsNow.size).toBe(256)
+    for (let i = 0; i < 256; i++) expect(idsNow.has(ids[i]!)).toBe(true)
+    for (let i = 256; i < 260; i++) expect(idsNow.has(ids[i]!)).toBe(false)
   })
 
   test("manual peers are never evicted by the cap", () => {
     const svc = withSelf(new DiscoveryService())
-    svc.addManualPeer({ alias: "office", peerId: "manual:office", address: "10.0.0.5", tcpPort: 24816, lastSeen: Date.now() })
+    svc.addManualPeer({ alias: "office", peerId: "manual:office", address: "10.0.0.5", tcpPort: 24816, lastSeen: performance.now() })
     const ids = freshPeerIds(260)
     for (let i = 0; i < 260; i++) {
-      svc.handleDatagram(buildAnnouncement(`peer-${i}`, ids[i]!, 24816), "192.168.1.1")
+      svc.handleDatagram(buildAnnouncement(`peer-${i}`, ids[i]!, 24816), `192.168.1.${(i % 250) + 1}`)
     }
     const peers = svc.listPeers()
     expect(peers.some((p) => p.peerId === "manual:office")).toBe(true)
@@ -353,5 +370,13 @@ describe("P2-9: 256-peer eviction and onPeersChanged change-semantics", () => {
     svc.handleDatagram(buildAnnouncement("renamed", id, 24816), "192.168.1.99")
     expect(emissions).toBe(3)
     expect(svc.listPeers()).toHaveLength(1)
+  })
+
+  test("the per-source cap bounds peers from one source address", () => {
+    const svc = withSelf(new DiscoveryService())
+    for (let i = 0; i < MAX_PEERS_PER_SOURCE + 2; i++) {
+      svc.handleDatagram(buildAnnouncement(`p${i}`, generateEphemeralIdentity().peerId, 24816), "192.168.1.77")
+    }
+    expect(svc.listPeers()).toHaveLength(MAX_PEERS_PER_SOURCE)
   })
 })

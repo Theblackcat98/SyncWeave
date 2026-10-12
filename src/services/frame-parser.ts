@@ -1,7 +1,7 @@
 /**
  * Application-layer frame parser for the Phase 2 direct-transfer protocol.
  *
- * Implements the phase2.md "Receiver parser: state-first, header-before-body"
+ * Implements the docs/history/phase2.md "Receiver parser: state-first, header-before-body"
  * requirement as transport-agnostic, testable code. This module defines the
  * application framing only; it does not select a transport, perform discovery,
  * authenticate peers, or send bytes. A hostile sender can always transmit
@@ -64,7 +64,6 @@ export type FrameType = (typeof FrameType)[keyof typeof FrameType]
  *  stable peer identities, filenames, or transfer details before confirmation. */
 export const ExtensionKey = {
   SessionId: 0x01,
-  TranscriptConfirmation: 0x02,
   RequestId: 0x03,
   FileId: 0x04,
   FileIndex: 0x05,
@@ -178,8 +177,8 @@ const allowedTypes: Record<Exclude<ReceiverState, "closed">, ReadonlySet<number>
 /** Protected extension keys allowed per frame type. Unknown or disallowed
  *  keys are rejected as soon as the key byte is recognized. */
 const allowedExtensionKeys: Record<number, ReadonlySet<number>> = {
-  [FrameType.SessionOpen]: new Set([ExtensionKey.SessionId, ExtensionKey.TranscriptConfirmation]),
-  [FrameType.IdentityConfirm]: new Set([ExtensionKey.SessionId, ExtensionKey.TranscriptConfirmation]),
+  [FrameType.SessionOpen]: new Set([ExtensionKey.SessionId]),
+  [FrameType.IdentityConfirm]: new Set([ExtensionKey.SessionId]),
   [FrameType.TransferRequest]: new Set([ExtensionKey.SessionId, ExtensionKey.RequestId]),
   [FrameType.TransferAccept]: new Set([ExtensionKey.SessionId, ExtensionKey.RequestId]),
   [FrameType.Decline]: new Set([ExtensionKey.SessionId]),
@@ -270,14 +269,30 @@ export class FrameParser {
    * any body byte is requested or allocated. On any violation the header is
    * rejected, the session is closed, and the body is never read.
    */
-  async readHeader(signal?: AbortSignal): Promise<HeaderOutcome> {
+  async readHeader(signal?: AbortSignal, headerTimeoutMs?: number | null): Promise<HeaderOutcome> {
     if (this.protocolState === "closed") {
       return { kind: "rejected", reason: this.closeReason ?? "session closed" }
     }
-    const timeout = AbortSignal.timeout(this.headerTimeoutMs)
-    const combined = signal
-      ? AbortSignal.any([signal, timeout])
-      : timeout
+    // `headerTimeoutMs` overrides the parser default for this read only.
+    // `null` means no parser-level budget: the caller owns the deadline
+    // (protocol v2 waits are bounded per stage, not per header; P1-18).
+    const budgetMs = headerTimeoutMs === undefined ? this.headerTimeoutMs : headerTimeoutMs
+    if (budgetMs === null) {
+      return this.parseHeader(signal)
+    }
+    const budget = new AbortController()
+    const timer = setTimeout(
+      () => budget.abort(new Error(`header read timed out after ${budgetMs}ms`)),
+      budgetMs,
+    )
+    try {
+      return await this.parseHeader(signal ? AbortSignal.any([signal, budget.signal]) : budget.signal)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private async parseHeader(combined: AbortSignal | undefined): Promise<HeaderOutcome> {
     let prefix: Uint8Array | null
     try {
       prefix = await this.source.read(FIXED_PREFIX_BYTES, combined)
@@ -315,6 +330,9 @@ export class FrameParser {
         `declared body length ${bodyLength} exceeds the 0x${type.toString(16)} cap of ${typeCap}`,
       )
     }
+    if (this.protocolState === "closed") {
+      return { kind: "rejected", reason: this.closeReason ?? "session closed" }
+    }
     if (!allowedTypes[this.protocolState].has(type)) {
       return this.reject(
         `frame type 0x${type.toString(16)} not allowed in state ${this.protocolState}`,
@@ -344,7 +362,7 @@ export class FrameParser {
    */
   private async readExtensionSection(
     frameType: number,
-    signal: AbortSignal,
+    signal: AbortSignal | undefined,
   ): Promise<
     | { kind: "rejected"; reason: string }
     | { kind: "ok"; fields: Map<number, Uint8Array>; bytes: number }
@@ -408,7 +426,7 @@ export class FrameParser {
 
   private async readExact(
     n: number,
-    signal: AbortSignal,
+    signal: AbortSignal | undefined,
   ): Promise<Uint8Array | "eof" | "aborted"> {
     try {
       const chunk = await this.source.read(n, signal)

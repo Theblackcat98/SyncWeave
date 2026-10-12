@@ -4,9 +4,11 @@ import { generateKeyPairSync, type KeyObject } from "node:crypto"
  * Session-ephemeral peer identity for the Phase 2 direct-transfer profile.
  *
  * Each session generates a fresh Ed25519 identity keypair. The Peer ID is
- * the libp2p-style encoding: protobuf-marshalled Ed25519 public key
- * (`08 01 12 20 <32 bytes>`), wrapped in the identity multihash (i.e. used
- * verbatim), multibase-base58btc encoded with the `z` prefix.
+ * `z` + base58btc(`08 01 12 20 <32-byte Ed25519 key>`): the protobuf
+ * encoding of the public key, with no multihash wrapper. It is NOT a libp2p
+ * Peer ID: there is no identity-multihash header (`00 24`) and no
+ * `12D3KooW` prefix. The encoding is always exactly PEER_ID_LENGTH (50)
+ * characters, because the 36-byte input always starts with `08`.
  *
  * The two users exchange and independently verify each other's COMPLETE
  * Peer ID out of band (read on screen, compared character by character).
@@ -49,13 +51,36 @@ function protobufMarshalEd25519PublicKey(rawPublicKey: Uint8Array): Uint8Array {
   return out
 }
 
+/** Every Peer ID produced by peerIdFromPublicKey has exactly this many characters. */
+export const PEER_ID_LENGTH = 50
+
+/** Random characters shown by formatPeerFingerprint (4 groups of 4). */
+export const PEER_FINGERPRINT_CHARS = 16
+
 /** Derive the Peer ID string from a raw 32-byte Ed25519 public key. */
 export function peerIdFromPublicKey(rawPublicKey: Uint8Array): string {
   return "z" + base58btcEncode(protobufMarshalEd25519PublicKey(rawPublicKey))
 }
 
+/**
+ * Short display form of a Peer ID for the UI (P1-35). The leading characters
+ * of a Peer ID are fixed by the key-type header, so only the trailing
+ * characters carry key material: this returns the last
+ * PEER_FINGERPRINT_CHARS characters, grouped in 4s (`ABCD-EFGH-IJKL-MNOP`).
+ * It is a human aid only; comparisons must use the complete Peer ID.
+ */
+export function formatPeerFingerprint(peerId: string): string {
+  if (!/^z[1-9A-HJ-NP-Za-km-z]{49}$/.test(peerId)) {
+    throw new TypeError("formatPeerFingerprint: not a well-formed Peer ID")
+  }
+  const tail = peerId.slice(-PEER_FINGERPRINT_CHARS)
+  const groups: string[] = []
+  for (let i = 0; i < tail.length; i += 4) groups.push(tail.slice(i, i + 4))
+  return groups.join("-")
+}
+
 export interface EphemeralIdentity {
-  /** Complete Peer ID string (e.g. "12D3KooW..."), for out-of-band display. */
+  /** Complete Peer ID string (`z` + 49 base58 characters), for out-of-band display. */
   readonly peerId: string
   /** Raw 32-byte Ed25519 public key. */
   readonly publicKey: Uint8Array

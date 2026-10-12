@@ -2,7 +2,6 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
-  createPrivateKey,
   createPublicKey,
   diffieHellman,
   generateKeyPairSync,
@@ -39,11 +38,9 @@ const NONCE_BYTES = 12
 /**
  * v2 handshake prologue (P0-1). Binds the Noise session to SyncWeave so a
  * handshake transcript cannot be transplanted into another protocol's
- * session. NOTE: the transport layer (transport.ts, owned separately) must
- * pass this as `prologue` to NoiseHandshake — until it does, handshakes run
- * with an empty prologue and this constant only documents the intended
- * value. Changing the prologue is a coordinated change: both ends must
- * agree or the handshake fails.
+ * session. transport.ts passes it as `prologue` on both dial and listen.
+ * Changing the prologue is a coordinated change: both ends must agree or
+ * the handshake fails.
  */
 export const NOISE_PROLOGUE_V2 = new TextEncoder().encode("syncweave-noise-prologue-v2")
 
@@ -55,6 +52,16 @@ export const NOISE_PROLOGUE_V2 = new TextEncoder().encode("syncweave-noise-prolo
  */
 export const MAX_NOISE_MESSAGE_BYTES = 65535
 export const MAX_NOISE_PLAINTEXT_BYTES = MAX_NOISE_MESSAGE_BYTES - 16
+
+/** Noise_XX has three handshake messages. */
+const HANDSHAKE_MESSAGE_COUNT = 3
+/**
+ * Exact handshake message sizes with empty payloads (P0-6):
+ *   msg1 -> e                 = 32
+ *   msg2 <- e, ee, s, es      = 32 + (32 + 16) + 16
+ *   msg3 -> s, se             = (32 + 16) + 16
+ */
+const HANDSHAKE_EMPTY_PAYLOAD_LENGTHS = [32, 96, 64] as const
 
 export interface X25519Keypair {
   privateKey: KeyObject
@@ -74,108 +81,6 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 function toU8(bytes: Uint8Array | Buffer | DataView): Uint8Array {
   if (bytes instanceof Uint8Array) return bytes
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-}
-
-const P25519 = (1n << 255n) - 19n
-const A24 = 121665n // (486662 - 2) / 4, per RFC 7748 §5
-
-function modMul(a: bigint, b: bigint): bigint {
-  return (a * b) % P25519
-}
-
-function modPow(base: bigint, exp: bigint): bigint {
-  let result = 1n
-  let b = ((base % P25519) + P25519) % P25519
-  let e = exp
-  while (e > 0n) {
-    if (e & 1n) result = modMul(result, b)
-    b = modMul(b, b)
-    e >>= 1n
-  }
-  return result
-}
-
-/**
- * X25519 scalar multiplication (RFC 7748 Montgomery ladder), x-coordinate
- * only. Used to derive a public key from a raw private key on runtimes whose
- * key import is too strict for private-only JWKs, and exported for tests.
- * The actual session Diffie-Hellman still uses node:crypto.
- */
-export function x25519ScalarMult(scalarBytes: Uint8Array, uBytes: Uint8Array): Uint8Array {
-  const clamped = Uint8Array.from(scalarBytes)
-  clamped[0] &= 248
-  clamped[31] &= 127
-  clamped[31] |= 64
-  let scalar = 0n
-  for (let i = 31; i >= 0; i--) {
-    scalar = (scalar << 8n) | BigInt(clamped[i]!)
-  }
-  let u = 0n
-  for (let i = 31; i >= 0; i--) {
-    u = (u << 8n) | BigInt(uBytes[i]!)
-  }
-  u %= P25519
-
-  const x1 = u
-  let x2 = 1n, z2 = 0n, x3 = u, z3 = 1n
-  // RFC 7748 §5 Montgomery ladder. The accumulating `swap` state is load-
-  // bearing: `swap ^= k_t` then conditional-swap, then `swap = k_t`.
-  let swap = 0n
-  for (let t = 254; t >= 0; t--) {
-    const kt = (scalar >> BigInt(t)) & 1n
-    swap ^= kt
-    if (swap === 1n) {
-      ;[x2, x3] = [x3, x2]
-      ;[z2, z3] = [z3, z2]
-    }
-    swap = kt
-    const a = (x2 + z2) % P25519
-    const aa = modMul(a, a)
-    const b = (x2 - z2 + P25519) % P25519
-    const bb = modMul(b, b)
-    const e = (aa - bb + P25519) % P25519
-    const c = (x3 + z3) % P25519
-    const d = (x3 - z3 + P25519) % P25519
-    const da = modMul(d, a)
-    const cb = modMul(c, b)
-    const sum = (da + cb) % P25519
-    const diff = (da - cb + P25519) % P25519
-    x3 = modMul(sum, sum)
-    z3 = modMul(x1, modMul(diff, diff))
-    x2 = modMul(aa, bb)
-    z2 = modMul(e, (aa + A24 * e) % P25519)
-  }
-  // Final conditional swap, per RFC 7748 §5.
-  if (swap === 1n) {
-    ;[x2, x3] = [x3, x2]
-    ;[z2, z3] = [z3, z2]
-  }
-  const result = modMul(x2, modPow(z2, P25519 - 2n))
-  const out = new Uint8Array(32)
-  let r = result
-  for (let i = 0; i < 32; i++) {
-    out[i] = Number(r & 0xffn)
-    r >>= 8n
-  }
-  return out
-}
-
-/** Derive an X25519 keypair from a raw 32-byte private key. */
-export function x25519FromPrivate(privateBytes: Uint8Array): X25519Keypair {
-  if (privateBytes.length !== 32) {
-    throw new Error("X25519 private key must be 32 bytes")
-  }
-  const publicKey = x25519ScalarMult(privateBytes, (() => { const b = new Uint8Array(32); b[0] = 9; return b })())
-  const privateKey = createPrivateKey({
-    key: {
-      kty: "OKP",
-      crv: "X25519",
-      x: Buffer.from(publicKey).toString("base64url"),
-      d: Buffer.from(privateBytes).toString("base64url"),
-    },
-    format: "jwk",
-  })
-  return { privateKey, publicKey }
 }
 
 export function x25519Generate(): X25519Keypair {
@@ -237,10 +142,6 @@ class CipherState {
   initializeKey(key: Uint8Array): void {
     this.k = Uint8Array.from(key)
     this.n = 0
-  }
-
-  get hasKey(): boolean {
-    return this.k !== null
   }
 
   encryptWithAd(ad: Uint8Array, plaintext: Uint8Array): Uint8Array {
@@ -316,13 +217,6 @@ class SymmetricState {
     this.cipher.initializeKey(tempK!)
   }
 
-  mixKeyAndHash(inputKeyMaterial: Uint8Array): void {
-    const [ck, tempH, tempK] = hkdf(this.ck, inputKeyMaterial, 3)
-    this.ck = ck!
-    this.mixHash(tempH!)
-    this.cipher.initializeKey(tempK!)
-  }
-
   encryptAndHash(plaintext: Uint8Array): Uint8Array {
     const ciphertext = this.cipher.encryptWithAd(this.h, plaintext)
     this.mixHash(ciphertext)
@@ -351,6 +245,12 @@ class SymmetricState {
 
 export interface NoiseHandshakeOptions {
   initiator: boolean
+  /**
+   * Allow non-empty handshake payloads. Off by default: SyncWeave's handshake
+   * carries empty payloads, so the three messages have exact lengths 32, 96
+   * and 64 bytes (P0-6). Only the official test vectors need payloads.
+   */
+  allowHandshakePayload?: boolean
   prologue?: Uint8Array
   /** Fixed static key (tests / vectors). Generated if omitted. */
   staticKey?: X25519Keypair
@@ -371,9 +271,12 @@ export class NoiseHandshake {
   private rs: Uint8Array | null = null
   private re: Uint8Array | null = null
   private messageIndex = 0
+  private splitDone = false
+  private readonly allowPayload: boolean
 
   constructor(options: NoiseHandshakeOptions) {
     this.initiator = options.initiator
+    this.allowPayload = options.allowHandshakePayload ?? false
     this.symmetric = new SymmetricState(NOISE_PROTOCOL_NAME)
     this.symmetric.mixHash(options.prologue ?? new Uint8Array(0))
     this.s = options.staticKey ?? x25519Generate()
@@ -391,9 +294,16 @@ export class NoiseHandshake {
   /** Produce the next handshake message for the given payload. */
   writeMessage(payload: Uint8Array): Uint8Array {
     const index = this.messageIndex
+    // P1-33: XX has exactly three messages (index 0..2).
+    if (index >= HANDSHAKE_MESSAGE_COUNT) {
+      throw new Error("Noise: handshake already complete (no further messages)")
+    }
     const turn = this.initiator ? index % 2 === 0 : index % 2 === 1
     if (!turn) {
       throw new Error("Noise: not this side's turn to write")
+    }
+    if (!this.allowPayload && payload.length !== 0) {
+      throw new Error("Noise: handshake payloads must be empty for this protocol")
     }
     // P0-6: the largest per-step overhead is 48 (encrypted s) + 16 (tag);
     // keep the emitted message within the Noise 65535-byte limit.
@@ -431,20 +341,27 @@ export class NoiseHandshake {
   /** Consume the peer's next handshake message, returning its payload. */
   readMessage(message: Uint8Array): Uint8Array {
     const index = this.messageIndex
+    if (index >= HANDSHAKE_MESSAGE_COUNT) {
+      throw new Error("Noise: handshake already complete (no further messages)")
+    }
     const turn = this.initiator ? index % 2 === 1 : index % 2 === 0
     if (!turn) {
       throw new Error("Noise: not this side's turn to read")
     }
-    // P0-6: bound pre-auth allocation. XX messages have fixed structure:
-    // msg1 = 32 (e); msg2 = 32 (e) + 48 (enc s) + 16 (enc payload);
-    // msg3 = 48 (enc s) + 16 (enc payload). Reject anything that cannot
-    // structurally be the expected message before decrypting it.
+    // P0-6: bound pre-auth allocation. With empty payloads the XX messages
+    // have exact sizes: msg1 = 32 (e); msg2 = 32 (e) + 48 (enc s) + 16 (tag);
+    // msg3 = 48 (enc s) + 16 (tag). Anything else is rejected before decrypt.
     if (message.length > MAX_NOISE_MESSAGE_BYTES) {
       throw new Error("Noise: handshake message exceeds the 65535-byte message limit")
     }
-    const minLength = this.initiator ? 80 : index === 0 ? 32 : 48
-    if (message.length < minLength) {
-      throw new Error(`Noise: handshake message too short (${message.length} < ${minLength})`)
+    const exactLength = HANDSHAKE_EMPTY_PAYLOAD_LENGTHS[index]!
+    if (message.length < exactLength) {
+      throw new Error(`Noise: handshake message too short (${message.length} < ${exactLength})`)
+    }
+    if (!this.allowPayload && message.length !== exactLength) {
+      throw new Error(
+        `Noise: handshake message has unexpected length (${message.length} != ${exactLength})`,
+      )
     }
     let offset: number
     if (this.initiator) {
@@ -490,6 +407,11 @@ export class NoiseHandshake {
     if (!this.handshakeComplete) {
       throw new Error("Noise: handshake not complete")
     }
+    // P1-33: a second split would hand out identical nonce-0 ciphers.
+    if (this.splitDone) {
+      throw new Error("Noise: split() may only be called once per handshake")
+    }
+    this.splitDone = true
     const [c1, c2] = this.symmetric.split()
     return this.initiator ? { send: c2, receive: c1 } : { send: c1, receive: c2 }
   }

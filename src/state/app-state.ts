@@ -1,6 +1,18 @@
 import type { AppState, Pane } from "../domain.js"
 
-export function createInitialAppState(paths: Record<Pane, string>, reducedMotion = process.env.SYNCWEAVE_REDUCED_MOTION === "1"): AppState {
+const TRUTHY = new Set(["1", "true", "yes", "on"])
+
+/** Env flag / boolean-ish value: 1, true, yes or on (case-insensitive). */
+export function isTruthyFlag(value: string | undefined): boolean {
+  return value !== undefined && TRUTHY.has(value.trim().toLowerCase())
+}
+
+/** NO_COLOR (https://no-color.org): any non-empty value disables colour. For the UI's theme. */
+export function noColorRequested(env: Record<string, string | undefined> = process.env): boolean {
+  return (env.NO_COLOR ?? "") !== ""
+}
+
+export function createInitialAppState(paths: Record<Pane, string>, reducedMotion = isTruthyFlag(process.env.SYNCWEAVE_REDUCED_MOTION)): AppState {
   return {
     screen: "workspace",
     activePane: "local",
@@ -24,6 +36,8 @@ export function createInitialAppState(paths: Record<Pane, string>, reducedMotion
     transferQueue: [],
     activeTransferId: null,
     reducedMotion,
+    sendSasConfirm: null,
+    sending: false,
   }
 }
 

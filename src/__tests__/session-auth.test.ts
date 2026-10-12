@@ -5,8 +5,9 @@ import {
   type TransferAuthorization,
 } from "../services/session-auth.js"
 
-const PEER_A = new Uint8Array([10, 20, 30, 40])
-const PEER_B = new Uint8Array([50, 60, 70, 80])
+// Verified identities are complete, fixed-length Peer IDs (P1-36).
+const PEER_A = new TextEncoder().encode(`z${"1".repeat(49)}`)
+const PEER_B = new TextEncoder().encode(`z${"2".repeat(49)}`)
 
 const FILES: AuthorizedFile[] = [
   { name: "report.pdf", bytes: 1_024, sha256: "a".repeat(64) },
