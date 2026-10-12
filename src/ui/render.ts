@@ -291,10 +291,12 @@ function renderRemoteStatus(data: RenderData, paneWidth: number, height: number,
     box.add(label(renderer, "status-peer-hint", truncate(`↑/↓ select target · ${peers.length} peer${peers.length === 1 ? "" : "s"}`, Math.max(10, paneWidth - 4)), theme.color.muted))
     peers.slice(0, 8).forEach((p, i) => {
       const selected = i === state.peerIndex % Math.max(1, peers.length)
+      // Manual peers were never probed; discovered peers were seen via multicast.
+      const stateTag = p.online ? "" : " [not probed]"
       box.add(label(
         renderer,
         `status-peer-${i}`,
-        truncate(`${selected ? "▸" : " "} ${p.name}  ${p.host}:${p.port}`, Math.max(10, paneWidth - 4)),
+        truncate(`${selected ? "▸" : " "} ${p.name}  ${p.host}:${p.port}${stateTag}`, Math.max(10, paneWidth - 4)),
         selected ? theme.color.focus : theme.color.text,
       ))
     })

@@ -453,6 +453,20 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
 
   function beginTransferRetry(id: string): void {
     stopProgress()
+    // Real mode: re-stage the failed transfer's files and re-open review.
+    // Fresh session, fresh consent, restart from zero (per decisions.md).
+    if (mode === "real") {
+      const record = state.transferQueue.find((r) => r.id === id)
+      if (!record || (record.status !== "failed" && record.status !== "cancelled")) {
+        state.status = "No failed or cancelled transfer is available to retry"
+        setScreen("queue")
+        return
+      }
+      for (const fileId of record.fileIds) state.staged.local.add(fileId)
+      state.status = `Re-staged ${record.fileIds.length} file(s) for retry · review and send`
+      setScreen("send-review")
+      return
+    }
     const retry = transferService.retry(id)
     if (!retry) {
       state.status = "No failed or cancelled transfer is available to retry"
@@ -793,7 +807,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         host: d.address,
         port: d.tcpPort,
         fingerprint: d.peerId,
-        online: true,
+        // Manual peers were never probed; discovered peers were seen via
+        // multicast within the expiry window.
+        online: !d.peerId.startsWith("manual:"),
       }))
       // listPeers() already includes manual peers (they live in the same
       // discovery map), so map the full list and dedupe by id — never
@@ -878,6 +894,20 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
             })
             state.status = `Received ${received.files.length} file(s) → ${real.receiveDirectory}`
             logEvent("transfer-complete", `received ${received.files.length} file(s) from ${received.verifiedPeerId.slice(0, 12)}`)
+            // Record the real incoming transfer in the queue.
+            state.transferQueue = [{
+              id: `real-recv-${Date.now()}`,
+              direction: "incoming" as const,
+              peerName: received.verifiedPeerId.slice(0, 12),
+              files: received.files.map((f) => f.name),
+              acceptedFiles: received.files.map((f) => f.name),
+              acceptedBytes: received.files.reduce((n, f) => n + f.bytes, 0),
+              destination: real.receiveDirectory,
+              fileIds: received.files.map((f) => f.path),
+              status: "complete" as const,
+              progress: 100,
+              createdAt: Date.now(),
+            }, ...state.transferQueue].slice(0, 50)
           } catch (error) {
             state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
             logEvent("transfer-fail", `receive: ${error instanceof Error ? error.message : String(error)}`)
@@ -938,6 +968,23 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     render()
     realSendInFlight = true
     logEvent("transfer-start", `send ${fileList.length} file(s) to ${destination.name} (${destination.host}:${destination.port})`)
+    // Real transfer-status model: the queue shows actual transfers, not mock
+    // simulations. Fed by send/receive; the mock service is a null in real mode.
+    const recordId = `real-send-${Date.now()}`
+    const record: TransferRecord = {
+      id: recordId,
+      direction: "outgoing" as const,
+      peerName: destination.name,
+      files: fileList.map((f) => f.name),
+      acceptedFiles: [],
+      acceptedBytes: 0,
+      destination: `${destination.host}:${destination.port}`,
+      fileIds: fileList.map((f) => f.path),
+      status: "transferring" as const,
+      progress: 0,
+      createdAt: Date.now(),
+    }
+    state.transferQueue = [record, ...state.transferQueue].slice(0, 50)
     try {
       const result = await sendFiles({
         host: destination.host,
@@ -950,6 +997,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         onProgress: (fileIndex, fileName, bytesSent, fileBytes) => {
           const pct = Math.round((bytesSent / Math.max(1, fileBytes)) * 100)
           state.status = `Sending ${fileName} (${fileIndex + 1}/${fileList.length}) · ${pct}%`
+          record.progress = Math.round(((fileIndex + pct / 100) / fileList.length) * 100)
           render()
         },
       })
@@ -959,8 +1007,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       const failed = result.outcomes.filter((o) => !o.ok)
       if (failed.length === 0) {
         state.status = `Sent ${okCount} file(s) to ${destination.name} · receiver confirmed · code ${result.sas}`
+        record.status = "complete"
+        record.progress = 100
+        record.acceptedFiles = result.outcomes.map((o) => o.finalName ?? o.name)
       } else {
         state.status = `Partial: ${okCount}/${result.outcomes.length} confirmed by receiver (${failed.map((f) => `${f.name}: ${f.errorCode ?? "failed"}`).join(", ")})`
+        record.status = "failed"
+        record.acceptedFiles = result.outcomes.filter((o) => o.ok).map((o) => o.finalName ?? o.name)
       }
       logEvent("transfer-complete", `sent ${okCount}/${result.outcomes.length} to ${destination.name}, sas=${result.sas}`)
       // Remove only the files the receiver confirmed; anything else stays
@@ -980,13 +1033,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       // (some files confirmed before the failure) keep those files unstaged.
       if (error instanceof TransferDeclinedError) {
         state.status = "Receiver declined the transfer"
+        record.status = "declined"
       } else if (error instanceof PeerCancelledError) {
         state.status = "Receiver cancelled the transfer"
+        record.status = "cancelled"
       } else if (error instanceof SendAbortedError && error.outcomes.length > 0) {
         const ok = error.outcomes.filter((o) => o.ok).length
         state.status = `Send interrupted: ${ok}/${error.outcomes.length} file(s) confirmed by receiver`
+        record.status = "failed"
       } else {
         state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+        record.status = "failed"
       }
       logEvent("transfer-fail", `send to ${destination.name}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {

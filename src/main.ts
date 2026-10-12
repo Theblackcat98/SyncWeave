@@ -7,6 +7,7 @@ import { logEvent } from "./services/diagnostic-log.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "./services/mock-transfer-service.js"
+import { NullPeerService, NullTransferService } from "./services/null-services.js"
 import { generateEphemeralIdentity } from "./services/peer-id.js"
 import { listenNoise } from "./services/transport.js"
 import { DiscoveryService } from "./services/discovery.js"
@@ -205,9 +206,12 @@ if (!realMode) {
     bindAddr,
   }
   const app = createSyncWeaveApp(renderer, {
+    // Real mode gets null services: the mock peer/transfer services simulate
+    // network behavior and must not exist in real mode. Real transfers feed
+    // state.transferQueue directly.
     filesystem: new MockFileSystemService(), // replaced by RealFileSystemService in real mode
-    peerService: new MockPeerService(),
-    transferService: new MockTransferService(),
+    peerService: new NullPeerService(),
+    transferService: new NullTransferService(),
     receiveDestinations: [receiveDirectory] as unknown as readonly [string, ...string[]],
     mode: "real",
     real,
