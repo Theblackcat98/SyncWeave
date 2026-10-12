@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Only one runtime dependency (@opentui/core); keep it current.
+    commit-message:
+      prefix: "chore"

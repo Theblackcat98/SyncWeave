@@ -53,6 +53,8 @@ export interface ConsentRequest {
   files: ConsentFile[]
   createdAt: number
   sourcePane?: Pane
+  /** Short auth string for out-of-band confirmation (real incoming only). */
+  sas?: string
 }
 
 export interface TransferRecord {

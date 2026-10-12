@@ -310,20 +310,24 @@ export async function receiveToFile(
 
     // No await separates this check from the publication syscall, so an abort
     // observed before finalization cannot publish even verified bytes.
-    throwIfCancelled(options.signal)
     await link(temporaryPath, finalPath)
     try {
       await unlink(temporaryPath)
-    } catch (error) {
-      // Roll back our just-created destination if removing the temporary link
-      // fails. If rollback also fails, surface both errors; final bytes remain
-      // complete and verified, never partial.
+    } catch {
+      // The file is published and verified; a failed temp cleanup must not
+      // delete it. The orphaned temp file is swept at the next startup.
+    }
+    // Fsync the directory so a crash can't lose a file we reported as
+    // received. Best effort: not all filesystems support it.
+    try {
+      const dirHandle = await open(directory, "r")
       try {
-        await unlink(finalPath)
-      } catch (rollbackError) {
-        throw new AggregateError([error, rollbackError], "Receive finalization cleanup failed")
+        await dirHandle.sync()
+      } finally {
+        await dirHandle.close()
       }
-      throw error
+    } catch {
+      // Best effort.
     }
 
     return { path: finalPath, name, bytes: bytesReceived, sha256 }

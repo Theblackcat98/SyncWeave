@@ -1,5 +1,5 @@
 import { createServer, connect, isIP, type Server, type Socket } from "node:net"
-import { NoiseHandshake, x25519Generate, type CipherState } from "./noise.js"
+import { NoiseHandshake, NOISE_PROLOGUE_V2, x25519Generate, type CipherState } from "./noise.js"
 
 /** Handshake budget (recorded decision): a stalled peer gets 60s, then the socket is destroyed. */
 const HANDSHAKE_TIMEOUT_MS = 60_000
@@ -423,6 +423,7 @@ async function runHandshake(socket: Socket, initiator: boolean, signal?: AbortSi
   const reader = new SocketReader(socket)
   const handshake = new NoiseHandshake({
     initiator,
+    prologue: NOISE_PROLOGUE_V2,
     staticKey: x25519Generate(),
   })
   const empty = new Uint8Array(0)

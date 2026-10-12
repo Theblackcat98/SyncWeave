@@ -372,6 +372,12 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
     return
   }
   card.add(label(renderer, "consent-sender", `${request.mode === "incoming" ? "Sender" : "Mock receiver"}: ${request.peer.name}  ·  ${request.peer.host}:${request.peer.port}`, theme.color.remote))
+  // The SAS is the human-confirmable identity: the sender's screen shows the
+  // same code. Confirm it out of band before accepting — the alias above is
+  // attacker-chosen.
+  if (request.sas) {
+    card.add(label(renderer, "consent-sas", `Security code: ${request.sas} · confirm with the sender before accepting`, theme.color.warning))
+  }
   card.add(label(renderer, "consent-count", `${request.files.length} proposed  ·  ${request.files.filter((file) => file.accepted).length} selected  ·  ${totalBytes(request.files.filter((file) => file.accepted))}`, theme.color.white))
   card.add(label(renderer, "consent-destination", `Destination: ${data.receiveDestinations[state.receiveDestinationIndex % data.receiveDestinations.length]}  [D] change`, theme.color.muted))
   card.add(label(renderer, "consent-scope", "Review every item. Nothing streams until you accept this transfer.", theme.color.warning))

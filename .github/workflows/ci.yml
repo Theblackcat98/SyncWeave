@@ -17,6 +17,8 @@ jobs:
           bun-version: 1.4.3
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
+      - name: Audit dependencies
+        run: bun audit
       - name: Typecheck and test
         run: bun run check
       - name: Headless UI smoke test

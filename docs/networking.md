@@ -30,12 +30,52 @@ local-only. Aliases are stripped of control characters before display.
 verification; discovered peers use exact Peer-ID verification. Invalid
 `--peer` specs are skipped with a warning.
 
+## Protocol v2 (wire changes)
+
+Frame version byte is `0x02`; v1 frames are rejected. All application
+frames still travel inside the Noise channel.
+
+- **Identity proof (P0-1):** each side signs a tagged, role-bound message —
+  `"syncweave-id-proof-v2" || role ("sender"/"receiver") || 0x02 ||`
+  handshake hash — instead of the raw hash. The proof body carries
+  `{v: 2, role, peerId, identityPublicKey, identitySignature}`. A proof
+  whose Peer ID equals the verifier's own is rejected (no self-accept /
+  reflection). A short authentication string (SAS, `1234-5678-9012`
+  format, derived from the handshake hash) is exposed on both ends for the
+  users to compare out of band; the UI must display it on send-review and
+  consent. Planned: a Noise prologue (`NOISE_PROLOGUE_V2`,
+  `"syncweave-noise-prologue-v2"`) — not yet passed by the transport.
+- **Session id (P1-12):** derived from the transcript hash
+  (`SHA-256("syncweave-session-id-v2" || handshakeHash)[0:16]`) so both
+  ends agree; the `SessionId` extension is validated on every frame.
+- **Acceptance (P0-7):** `TRANSFER_ACCEPT` carries `acceptedIndices`
+  (indices into the request, unique, in range) instead of file objects, plus
+  a receiver-issued `transferToken` echoed in every `FILE_HEADER`
+  extension, binding the stream to the Gate C decision.
+- **Acknowledgement (P0-2):** the receiver sends `FILE_RESULT`
+  `{index, ok, finalName, bytes, sha256} | {index, ok: false, errorCode}`
+  per file, then a final `SESSION_RESULT`. The sender reports success only
+  after matching results arrive; a close or timeout before the result is a
+  failure. `sendFiles` returns `{outcomes, verifiedPeerId, sas}`.
+- **Decline (P1-9):** explicit `DECLINE` frame instead of
+  decline-as-exception; both sides report "declined".
+- **Cancel/error (P1-10):** reason-coded `CANCEL`/`ERROR` frames are sent
+  on local abort/failure and handled in every reading state.
+- **Size caps (P0-6):** per-type body caps enforced on the header —
+  handshake-adjacent frames ≤ 4 KiB, request/accept ≤ 64 KiB.
+  `FILE_CHUNK` bodies are 65,474 bytes so the Noise ciphertext never
+  exceeds the 65,535-byte message limit (plaintext ≤ 65,519 enforced in
+  the Noise layer; handshake messages structurally length-checked).
+- **Identity discipline (P1-13):** one ephemeral Ed25519 identity per
+  session; reuse across sessions fails closed.
+
 ## Security properties
 
 - **Encryption:** Noise XX handshake, fresh ephemeral X25519 keys per
   session; verified byte-for-byte against the official Noise test vectors.
-- **Identity:** ephemeral Ed25519 Peer ID per run, signature over the
-  handshake hash (Gate B). Discovery never substitutes for verification.
+- **Identity:** ephemeral Ed25519 Peer ID per session (never reused),
+  signature over the tagged, role-bound v2 proof message (Gate B), plus a
+  user-comparable SAS. Discovery never substitutes for verification.
 - **Consent:** receiver must accept each transfer (Gate C) before any file
   bytes flow. No auto-accept, no persistent pairing.
 - **Budgets (both ends):** 25 files/session, 2 GiB/file, 10 GiB/session.

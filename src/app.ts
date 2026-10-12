@@ -5,7 +5,7 @@ import type { FileSystemService, PeerService, TransferService } from "./services
 import { RealFileSystemService } from "./services/real-filesystem.js"
 import type { EphemeralIdentity } from "./services/peer-id.js"
 import { listenNoise } from "./services/transport.js"
-import { receiveFiles, sendFiles } from "./services/transfer-protocol.js"
+import { receiveFiles, sendFiles, TransferDeclinedError, PeerCancelledError, SendAbortedError } from "./services/transfer-protocol.js"
 import type { DiscoveryService, DiscoveredPeer } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
 type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
@@ -820,7 +820,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     // Consent bridge: receiveFiles' onTransferRequest needs user input from
     // the TUI. We park the resolver (consumed by command() above), show the
     // consent screen, and resolve it when the user accepts/declines there.
-    const pendingConsent = (request: { peerId: string; files: Array<{ name: string; bytes: number; sha256: string }> }) => {
+    const pendingConsent = (request: { peerId: string; files: Array<{ name: string; bytes: number; sha256: string }>; sas: string }) => {
       return new Promise<Array<{ name: string; bytes: number; sha256: string }>>((resolve) => {
         // If a previous consent is still parked, auto-decline it instead of
         // orphaning its promise (and its channel) forever.
@@ -842,9 +842,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           peer: sender ?? { id: request.peerId, name: request.peerId.slice(0, 12), host: "", port: 0, fingerprint: request.peerId, online: true },
           files: request.files.map((f) => ({ id: f.sha256, name: f.name, bytes: f.bytes, accepted: true, renamed: false })),
           createdAt: Date.now(),
+          // The SAS must be confirmed out of band (in person, over a call)
+          // before accepting: discovery announcements are unauthenticated.
+          sas: request.sas,
         }
         state.selectedConsentFile = 0
-        state.status = `Incoming transfer from ${request.peerId.slice(0, 12)}… · review and accept/decline`
+        state.consentScrollOffset = 0
+        state.status = `Incoming transfer from ${request.peerId.slice(0, 12)}… · confirm SAS ${request.sas}, then review and accept/decline`
         setScreen("consent")
       })
     }
@@ -863,17 +867,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
               channel: hs.channel,
               handshakeHash: hs.handshakeHash,
               // No out-of-band expected ID: the consent screen shows the
-              // verified Peer ID and the user's accept is the confirmation.
+              // verified Peer ID and SAS, and the user's accept is the
+              // confirmation. Identity is fresh per session (P1-13).
               destinationDirectory: real.receiveDirectory,
-              identity: real.identity,
               onTransferRequest: pendingConsent,
               onProgress: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => {
                 state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
                 render()
               },
             })
-            state.status = `Received ${received.length} file(s) → ${real.receiveDirectory}`
-            logEvent("transfer-complete", `received ${received.length} file(s)`)
+            state.status = `Received ${received.files.length} file(s) → ${real.receiveDirectory}`
+            logEvent("transfer-complete", `received ${received.files.length} file(s) from ${received.verifiedPeerId.slice(0, 12)}`)
           } catch (error) {
             state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
             logEvent("transfer-fail", `receive: ${error instanceof Error ? error.message : String(error)}`)
@@ -935,27 +939,55 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     realSendInFlight = true
     logEvent("transfer-start", `send ${fileList.length} file(s) to ${destination.name} (${destination.host}:${destination.port})`)
     try {
-      await sendFiles({
+      const result = await sendFiles({
         host: destination.host,
         port: destination.port,
         files: fileList,
         // Discovered peers carry their verified Peer ID; manual peers use
         // TOFU (their ID is unknown until the handshake verifies it).
+        // Identity is fresh per session (P1-13); never reuse one.
         expectedPeerId: destination.fingerprint.startsWith("manual:") ? undefined : destination.fingerprint,
-        identity: real.identity,
         onProgress: (fileIndex, fileName, bytesSent, fileBytes) => {
           const pct = Math.round((bytesSent / Math.max(1, fileBytes)) * 100)
           state.status = `Sending ${fileName} (${fileIndex + 1}/${fileList.length}) · ${pct}%`
           render()
         },
       })
-      state.status = `Sent ${fileList.length} file(s) to ${destination.name}`
-      logEvent("transfer-complete", `sent ${fileList.length} file(s) to ${destination.name}`)
-      // Remove only the files that were sent; anything staged elsewhere
-      // (other folders, re-staged mid-send) stays.
-      for (const id of sentIds) state.staged.local.delete(id)
+      // Per-file outcomes: "Sent" is only true when the receiver acked each
+      // file (P0-2). The SAS lets the receiver confirm our identity.
+      const okCount = result.outcomes.filter((o) => o.ok).length
+      const failed = result.outcomes.filter((o) => !o.ok)
+      if (failed.length === 0) {
+        state.status = `Sent ${okCount} file(s) to ${destination.name} · receiver confirmed · code ${result.sas}`
+      } else {
+        state.status = `Partial: ${okCount}/${result.outcomes.length} confirmed by receiver (${failed.map((f) => `${f.name}: ${f.errorCode ?? "failed"}`).join(", ")})`
+      }
+      logEvent("transfer-complete", `sent ${okCount}/${result.outcomes.length} to ${destination.name}, sas=${result.sas}`)
+      // Remove only the files the receiver confirmed; anything else stays
+      // staged for retry.
+      for (const o of result.outcomes) {
+        if (o.ok) {
+          const id = fileList.find((f) => f.name === o.name)?.path
+          if (id) state.staged.local.delete(id)
+        }
+      }
+      // Back-compat: clear the captured set on full success.
+      if (failed.length === 0) {
+        for (const id of sentIds) state.staged.local.delete(id)
+      }
     } catch (error) {
-      state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+      // Specific protocol errors get specific messages; partial outcomes
+      // (some files confirmed before the failure) keep those files unstaged.
+      if (error instanceof TransferDeclinedError) {
+        state.status = "Receiver declined the transfer"
+      } else if (error instanceof PeerCancelledError) {
+        state.status = "Receiver cancelled the transfer"
+      } else if (error instanceof SendAbortedError && error.outcomes.length > 0) {
+        const ok = error.outcomes.filter((o) => o.ok).length
+        state.status = `Send interrupted: ${ok}/${error.outcomes.length} file(s) confirmed by receiver`
+      } else {
+        state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+      }
       logEvent("transfer-fail", `send to ${destination.name}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       realSendInFlight = false

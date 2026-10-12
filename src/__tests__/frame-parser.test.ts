@@ -278,3 +278,32 @@ test("extension section bounds are enforced", async () => {
     "rejected",
   )
 })
+
+test("v2: v1 frames are rejected", async () => {
+  const v1 = encodeFrame(FrameType.SessionOpen, new Uint8Array(0), [], 0x01)
+  const outcome = await parserFor(v1).parser.readHeader()
+  expect(outcome.kind).toBe("rejected")
+  if (outcome.kind === "rejected") {
+    expect(outcome.reason).toMatch(/version/)
+  }
+})
+
+test("v2: per-type body caps reject oversized declarations on the header", async () => {
+  const mk = (declared: number) => {
+    const forged = encodeFrame(FrameType.SessionOpen, new Uint8Array(10))
+    new DataView(forged.buffer).setUint32(4, declared)
+    const source = new ScriptedSource([forged])
+    return new FrameParser(source, {
+      maxBodyLength: 1_000_000,
+      maxBodyLengthByType: { [FrameType.SessionOpen]: 4096 },
+      headerTimeoutMs: 2_000,
+    })
+  }
+  // 5000 > 4096 cap: rejected before any body read.
+  const over = await mk(5000).readHeader()
+  expect(over.kind).toBe("rejected")
+  if (over.kind === "rejected") expect(over.reason).toMatch(/cap/)
+  // 4000 <= 4096: header accepted.
+  const under = await mk(4000).readHeader()
+  expect(under.kind).toBe("header")
+})

@@ -1,5 +1,5 @@
 import { createCliRenderer } from "@opentui/core"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, readdirSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { createSyncWeaveApp, type RealTransport } from "./app.js"
@@ -176,6 +176,20 @@ if (!realMode) {
   } catch (error) {
     fatal(`could not create receive directory ${receiveDirectory}: ${error instanceof Error ? error.message : String(error)}`)
   }
+  // Sweep orphaned staging temp files from killed sessions (kill -9,
+  // SIGTERM before handlers ran, crashes). They are never user data.
+  try {
+    let swept = 0
+    for (const name of readdirSync(receiveDirectory)) {
+      if (name.startsWith(".syncweave-") && name.endsWith(".partial")) {
+        try {
+          unlinkSync(join(receiveDirectory, name))
+          swept++
+        } catch { /* best effort */ }
+      }
+    }
+    if (swept > 0) logEvent("startup-sweep", `removed ${swept} orphaned partial file(s)`)
+  } catch { /* best effort */ }
 
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
   logEvent("session-start", `real mode alias=${alias} port=${tcpPort} bind=${bindAddr}`)

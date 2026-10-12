@@ -36,6 +36,26 @@ export const NOISE_PROTOCOL_NAME = "Noise_XX_25519_AESGCM_SHA256"
 const HASHLEN = 32
 const NONCE_BYTES = 12
 
+/**
+ * v2 handshake prologue (P0-1). Binds the Noise session to SyncWeave so a
+ * handshake transcript cannot be transplanted into another protocol's
+ * session. NOTE: the transport layer (transport.ts, owned separately) must
+ * pass this as `prologue` to NoiseHandshake — until it does, handshakes run
+ * with an empty prologue and this constant only documents the intended
+ * value. Changing the prologue is a coordinated change: both ends must
+ * agree or the handshake fails.
+ */
+export const NOISE_PROLOGUE_V2 = new TextEncoder().encode("syncweave-noise-prologue-v2")
+
+/**
+ * Noise spec §5.1: a transport message (payload + 16-byte AEAD tag) must
+ * not exceed 65535 bytes, so the largest legal plaintext is 65519 bytes.
+ * Enforced here so no caller can emit or accept an over-limit message
+ * (P0-6).
+ */
+export const MAX_NOISE_MESSAGE_BYTES = 65535
+export const MAX_NOISE_PLAINTEXT_BYTES = MAX_NOISE_MESSAGE_BYTES - 16
+
 export interface X25519Keypair {
   privateKey: KeyObject
   publicKey: Uint8Array
@@ -227,6 +247,11 @@ class CipherState {
     if (this.k === null) {
       return Uint8Array.from(plaintext)
     }
+    if (plaintext.length > MAX_NOISE_PLAINTEXT_BYTES) {
+      throw new Error(
+        `Noise plaintext ${plaintext.length} bytes exceeds the 65535-byte message limit`,
+      )
+    }
     if (this.n >= 0xffffffff) {
       throw new Error("Noise nonce overflow")
     }
@@ -247,6 +272,11 @@ class CipherState {
     }
     if (ciphertext.length < 16) {
       throw new Error("Noise ciphertext too short")
+    }
+    if (ciphertext.length > MAX_NOISE_MESSAGE_BYTES) {
+      throw new Error(
+        `Noise ciphertext ${ciphertext.length} bytes exceeds the 65535-byte message limit`,
+      )
     }
     const decipher = createDecipheriv("aes-256-gcm", Buffer.from(this.k), Buffer.from(nonceBytes(this.n)))
     decipher.setAAD(Buffer.from(ad))
@@ -365,6 +395,11 @@ export class NoiseHandshake {
     if (!turn) {
       throw new Error("Noise: not this side's turn to write")
     }
+    // P0-6: the largest per-step overhead is 48 (encrypted s) + 16 (tag);
+    // keep the emitted message within the Noise 65535-byte limit.
+    if (payload.length > MAX_NOISE_PLAINTEXT_BYTES - 64) {
+      throw new Error("Noise: handshake payload too large")
+    }
     let buffer: Uint8Array
     if (this.initiator) {
       if (index === 0) {
@@ -399,6 +434,17 @@ export class NoiseHandshake {
     const turn = this.initiator ? index % 2 === 1 : index % 2 === 0
     if (!turn) {
       throw new Error("Noise: not this side's turn to read")
+    }
+    // P0-6: bound pre-auth allocation. XX messages have fixed structure:
+    // msg1 = 32 (e); msg2 = 32 (e) + 48 (enc s) + 16 (enc payload);
+    // msg3 = 48 (enc s) + 16 (enc payload). Reject anything that cannot
+    // structurally be the expected message before decrypting it.
+    if (message.length > MAX_NOISE_MESSAGE_BYTES) {
+      throw new Error("Noise: handshake message exceeds the 65535-byte message limit")
+    }
+    const minLength = this.initiator ? 80 : index === 0 ? 32 : 48
+    if (message.length < minLength) {
+      throw new Error(`Noise: handshake message too short (${message.length} < ${minLength})`)
     }
     let offset: number
     if (this.initiator) {

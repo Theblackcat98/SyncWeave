@@ -1,5 +1,6 @@
-import { createHash, createPublicKey, sign, verify } from "node:crypto"
-import { createReadStream, promises as fs } from "node:fs"
+import { createHash, createPublicKey, getRandomValues, sign, verify } from "node:crypto"
+import { promises as fs } from "node:fs"
+import { type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
 import {
   encodeFrame,
@@ -17,41 +18,91 @@ import {
 import { receiveToFile, sanitizePeerBasename } from "./safe-receive-sink.js"
 
 /**
- * Phase 2 direct-transfer protocol (see phase2.md and docs/decisions.md).
+ * Phase 2 direct-transfer protocol, version 2 (see docs/networking.md
+ * "Protocol v2" and docs/decisions.md).
  *
  * Wire flow (all application frames travel inside the Noise-encrypted
  * channel; handshake messages are Noise, not application frames):
  *
- *   Sender -> Receiver: SESSION_OPEN      (sender's identity proof)
- *   Receiver -> Sender: IDENTITY_CONFIRM  (receiver's identity proof)
+ *   Sender -> Receiver: SESSION_OPEN      (sender's v2 identity proof)
+ *   Receiver -> Sender: IDENTITY_CONFIRM  (receiver's v2 identity proof)
  *   Sender -> Receiver: TRANSFER_REQUEST  (file metadata, after Gate B)
- *   Receiver -> Sender: TRANSFER_ACCEPT   (Gate C: exact accepted subset)
+ *   Receiver -> Sender: TRANSFER_ACCEPT   (Gate C: accepted *indices* + transfer token)
+ *                      | DECLINE           (explicit decline, P1-9)
  *   Sender -> Receiver: FILE_HEADER, FILE_CHUNK*, FILE_END per file
- *   Either -> Either:   CANCEL | ERROR
+ *   Receiver -> Sender: FILE_RESULT       (per-file acknowledgement, P0-2)
+ *   Receiver -> Sender: SESSION_RESULT    (final session outcome, P0-2)
+ *   Either -> Either:   CANCEL | ERROR    (reason-coded teardown, P1-10)
  *
- * Identity binding: each side signs the Noise handshake hash with its
- * session-ephemeral Ed25519 identity key and sends the public key + Peer ID
- * in its first encrypted frame. The peer verifies the signature over the
- * handshake hash (binding the identity to this exact connection), derives
- * the Peer ID from the public key, and compares the COMPLETE Peer ID with
- * the out-of-band expected value. A mismatch aborts the session before any
- * file metadata flows.
+ * Identity binding (P0-1): each side signs a TAGGED, ROLE-BOUND v2 proof
+ * message — "syncweave-id-proof-v2" || role || version || handshake hash —
+ * with its session-ephemeral Ed25519 identity key. The peer verifies the
+ * signature, derives the Peer ID from the key, compares the COMPLETE Peer
+ * ID with the out-of-band expected value, and rejects a proof whose Peer
+ * ID equals its own (no self-accept / reflection). A short authentication
+ * string (SAS) derived from the handshake hash is exposed on both ends so
+ * the users can confirm identity out of band; the UI must display it.
  *
  * Gate B (two independent confirmations): the local user's confirmation is
  * their act of providing the expected Peer ID; the remote user's
  * confirmation is their valid IDENTITY_CONFIRM/SESSION_OPEN proof.
  * Gate C (separate receiver acceptance): the receiver's explicit subset
- * choice, sent as TRANSFER_ACCEPT. The sender emits no file-body bytes
- * before receiving it.
+ * choice, sent as TRANSFER_ACCEPT carrying request INDICES (P0-7) and a
+ * receiver-issued transfer token echoed on every FILE_HEADER (P1-12).
+ * The sender emits no file-body bytes before receiving it.
  *
- * Files stream in 64 KiB FILE_CHUNK frames; whole files are never buffered.
- * Received files are written via the safe receive sink with automatic
- * rename on collision (`name (1).ext`). SHA-256 is verified before
- * finalization. Sessions are memory-only; restart-from-zero on failure.
+ * Completion (P0-2): the sender reports success ONLY after receiving a
+ * matching FILE_RESULT per file and a final SESSION_RESULT. A close before
+ * the result, or a timeout, is a failure.
+ *
+ * The session id is derived from the Noise transcript hash so both
+ * endpoints agree on it (P1-12); every frame's SessionId extension is
+ * validated. Frame bodies are capped per type (P0-6) and FILE_CHUNK is
+ * sized so the Noise ciphertext never exceeds 65535 bytes.
+ *
+ * Files stream in ~64 KiB FILE_CHUNK frames; whole files are never
+ * buffered. Received files are written via the safe receive sink with
+ * automatic rename on collision (`name (1).ext`). SHA-256 is verified
+ * before finalization. Sessions are memory-only; restart-from-zero on
+ * failure. `destroySession` runs in a finally on both ends (P1-14).
  */
 
-const CHUNK_BYTES = 64 * 1024
-const APP_MAX_BODY = 16 * 1024 * 1024
+/** Protocol version 2: v1 frames are rejected by the frame parser. */
+export const PROTOCOL_VERSION = 2
+
+/**
+ * Largest FILE_CHUNK body whose encrypted frame fits in one Noise message:
+ * 65535 (Noise limit) - 16 (AEAD tag) - 8 (frame prefix) - 37 (extension:
+ * 1 count byte + SessionId 18 + FileId 18). The old 64 KiB chunk produced
+ * 65,597-byte ciphertexts, over the Noise limit (P0-6).
+ */
+const CHUNK_BYTES = 65535 - 16 - 8 - 37
+/** Receiver-issued transfer token length (P1-12). */
+const TRANSFER_TOKEN_BYTES = 16
+/** How long the sender waits for each FILE_RESULT / SESSION_RESULT (P0-2). */
+const RESULT_TIMEOUT_MS = 60_000
+
+/**
+ * Per-frame-type body caps (P0-6), enforced by the parser on the header
+ * before any body byte is read or allocated: handshake-adjacent frames are
+ * small, metadata frames fit 25 files, and no frame approaches the 16 MiB
+ * pre-auth allocation the old code allowed.
+ */
+const BODY_CAPS_V2: Partial<Record<number, number>> = {
+  [FrameType.SessionOpen]: 4 * 1024,
+  [FrameType.IdentityConfirm]: 4 * 1024,
+  [FrameType.TransferRequest]: 64 * 1024,
+  [FrameType.TransferAccept]: 64 * 1024,
+  [FrameType.Decline]: 1024,
+  [FrameType.FileHeader]: 4 * 1024,
+  [FrameType.FileChunk]: 64 * 1024,
+  [FrameType.FileEnd]: 1024,
+  [FrameType.FileResult]: 4 * 1024,
+  [FrameType.SessionResult]: 4 * 1024,
+  [FrameType.Cancel]: 1024,
+  [FrameType.Error]: 2 * 1024,
+}
+
 const APP_MAX_NAME_BYTES = 255
 /** Resource budgets (Nick's recorded decisions): enforced on BOTH endpoints.
  * The sender checks before transmitting; the receiver re-checks the
@@ -91,24 +142,66 @@ export interface ReceivedFile extends ProtocolFile {
   path: string
 }
 
+/** Short authentication string: 3 groups of 4 digits (~40 bits) derived
+ *  from the Noise handshake hash. Both endpoints compute the same value;
+ *  the UI must show it on the send-review and consent screens so the two
+ *  humans can confirm they are talking to each other (P0-1). */
+export function sasFromHandshakeHash(handshakeHash: Uint8Array): string {
+  const digest = createHash("sha256")
+    .update("syncweave-sas-v2", "utf8")
+    .update(handshakeHash)
+    .digest()
+  const group = (i: number): string =>
+    (((digest[i]! << 8) | digest[i + 1]!) % 10000).toString().padStart(4, "0")
+  return `${group(0)}-${group(2)}-${group(4)}`
+}
+
+/** Session id both endpoints agree on without a round trip (P1-12). */
+export function sessionIdFromHandshakeHash(handshakeHash: Uint8Array): Uint8Array {
+  return createHash("sha256")
+    .update("syncweave-session-id-v2", "utf8")
+    .update(handshakeHash)
+    .digest()
+    .subarray(0, 16)
+}
+
+export type ProofRole = "sender" | "receiver"
+
 interface IdentityProofBody {
+  v: 2
+  role: ProofRole
   peerId: string
   identityPublicKey: string // base64
-  identitySignature: string // base64, Ed25519 over the Noise handshake hash
+  /** base64 Ed25519 signature over the TAGGED v2 proof message (below). */
+  identitySignature: string
 }
 
-function transcriptConfirmation(handshakeHash: Uint8Array, sessionId: Uint8Array): string {
-  const digest = createHash("sha256")
-    .update("syncweave-transcript-confirmation-v1", "utf8")
-    .update(handshakeHash)
-    .update(sessionId)
-    .digest("hex")
-  return `${digest.slice(0, 4)}-${digest.slice(4, 8)}-${digest.slice(8, 12)}`
+const ID_PROOF_DOMAIN_V2 = "syncweave-id-proof-v2"
+
+/**
+ * The v2 proof message (P0-1): domain tag || role || version byte ||
+ * handshake hash. The tag and role prevent cross-protocol and
+ * cross-role proof replay; the version binds the proof to protocol v2.
+ */
+function proofMessageV2(role: ProofRole, handshakeHash: Uint8Array): Uint8Array {
+  return Buffer.concat([
+    Buffer.from(ID_PROOF_DOMAIN_V2, "utf8"),
+    Buffer.from(role, "utf8"),
+    Buffer.from([PROTOCOL_VERSION]),
+    Buffer.from(handshakeHash),
+  ])
 }
 
-function signProof(identity: EphemeralIdentity, handshakeHash: Uint8Array): IdentityProofBody {
-  const signature = sign(null, Buffer.from(handshakeHash), identity.privateKey)
+/** Exported for tests: build a v2 identity proof. */
+export function signProof(
+  identity: EphemeralIdentity,
+  handshakeHash: Uint8Array,
+  role: ProofRole,
+): IdentityProofBody {
+  const signature = sign(null, proofMessageV2(role, handshakeHash), identity.privateKey)
   return {
+    v: 2,
+    role,
     peerId: identity.peerId,
     identityPublicKey: Buffer.from(identity.publicKey).toString("base64"),
     identitySignature: signature.toString("base64"),
@@ -116,16 +209,26 @@ function signProof(identity: EphemeralIdentity, handshakeHash: Uint8Array): Iden
 }
 
 /**
- * Verify an identity proof: signature over the handshake hash with the
- * presented key, Peer ID derived from that key, exact match with the
- * out-of-band expected Peer ID. Returns the verified Peer ID string for
- * session binding. Throws on any failure (fail closed).
+ * Verify an identity proof (P0-1): the body must claim v2 and the expected
+ * role, the signature must bind the tagged message to this exact session,
+ * the Peer ID must be re-derived from the proved key, must match the
+ * out-of-band expected value when one was provided, and must NOT be our
+ * own identity (self-connection / reflection rejected). Returns the
+ * verified Peer ID string for session binding. Throws on any failure
+ * (fail closed). Exported for tests.
  */
-function verifyProof(
+export function verifyProof(
   proof: IdentityProofBody,
   handshakeHash: Uint8Array,
-  expectedPeerId?: string,
+  expectedPeerId: string | undefined,
+  opts: { expectedRole: ProofRole; ownPeerId: string },
 ): string {
+  if (proof.v !== 2) {
+    throw new Error("identity proof: unsupported proof version")
+  }
+  if (proof.role !== opts.expectedRole) {
+    throw new Error(`identity proof: unexpected role ${proof.role}`)
+  }
   let publicKey: Uint8Array
   try {
     publicKey = new Uint8Array(Buffer.from(proof.identityPublicKey, "base64"))
@@ -145,15 +248,20 @@ function verifyProof(
   } catch {
     throw new Error("identity proof: malformed signature")
   }
-  const valid = verify(null, Buffer.from(handshakeHash), keyObject, signature)
+  // Verify against the EXPECTED role, not the claimed one: flipping the
+  // role string in the body invalidates the signature.
+  const valid = verify(null, proofMessageV2(opts.expectedRole, handshakeHash), keyObject, signature)
   if (!valid) {
     throw new Error("identity proof: signature does not bind to this session")
+  }
+  const derived = peerIdFromPublicKey(publicKey)
+  if (verifyPeerId(derived, opts.ownPeerId)) {
+    throw new Error("identity proof: peer presented our own identity (self-connection or reflection)")
   }
   // Re-derive the Peer ID from the verified key. If an out-of-band expected
   // value was provided, compare the complete string exactly; otherwise the
   // caller is responsible for presenting the verified ID to the user
   // (trust-on-first-use via an explicit accept action).
-  const derived = peerIdFromPublicKey(publicKey)
   if (expectedPeerId !== undefined) {
     if (!verifyPeerId(expectedPeerId, derived) || !verifyPeerId(expectedPeerId, proof.peerId)) {
       throw new Error("identity proof: Peer ID does not match the expected out-of-band identity")
@@ -164,8 +272,23 @@ function verifyProof(
   return derived
 }
 
-function parseJsonBody(header: FrameHeader, body: Uint8Array, what: string): unknown {
-  void header
+/**
+ * Per-session identity discipline (P1-13): an ephemeral identity must
+ * never be reused across sessions. The transfer protocol generates a fresh
+ * identity per send/receive call; callers that inject one (tests) must
+ * also use it only once. A reused identity fails closed here.
+ */
+const claimedIdentities = new Set<string>()
+function claimIdentity(identity: EphemeralIdentity): void {
+  if (claimedIdentities.has(identity.peerId)) {
+    throw new Error(
+      "identity reuse across sessions is forbidden: generate a fresh ephemeral identity per session",
+    )
+  }
+  claimedIdentities.add(identity.peerId)
+}
+
+function parseJsonBody(body: Uint8Array, what: string): unknown {
   try {
     return JSON.parse(Buffer.from(body).toString("utf8"))
   } catch {
@@ -213,6 +336,12 @@ export function validateIdentityProofBody(body: unknown): asserts body is Identi
   if (!isRecord(body)) {
     throw new Error("malformed identity proof: not an object")
   }
+  if (body.v !== 2) {
+    throw new Error("malformed identity proof: bad version")
+  }
+  if (body.role !== "sender" && body.role !== "receiver") {
+    throw new Error("malformed identity proof: bad role")
+  }
   for (const k of ["peerId", "identityPublicKey", "identitySignature"] as const) {
     if (typeof body[k] !== "string" || (body[k] as string).length === 0) {
       throw new Error(`malformed identity proof: bad ${k}`)
@@ -226,8 +355,157 @@ export function validateSha256Body(body: unknown): asserts body is { sha256: str
   }
 }
 
+/** v2 TRANSFER_ACCEPT body: accepted REQUEST INDICES (P0-7) + transfer token. */
+export interface TransferAcceptBody {
+  acceptedIndices: number[]
+  /** base64 receiver-issued transfer token, echoed on every FILE_HEADER. */
+  transferToken: string
+}
+
+export function validateTransferAcceptBody(body: unknown): asserts body is TransferAcceptBody {
+  if (!isRecord(body)) {
+    throw new Error("malformed transfer acceptance: not an object")
+  }
+  if (!Array.isArray(body.acceptedIndices)) {
+    throw new Error("malformed transfer acceptance: acceptedIndices is not an array")
+  }
+  for (const i of body.acceptedIndices) {
+    if (typeof i !== "number" || !Number.isSafeInteger(i) || i < 0) {
+      throw new Error("malformed transfer acceptance: bad index")
+    }
+  }
+  if (
+    typeof body.transferToken !== "string" ||
+    body.transferToken.length === 0 ||
+    body.transferToken.length > 64
+  ) {
+    throw new Error("malformed transfer acceptance: bad transferToken")
+  }
+}
+
+export interface FileResultBody {
+  index: number
+  ok: boolean
+  /** Receiver-reported final name (after autorename); present when ok. */
+  finalName?: string
+  bytes?: number
+  sha256?: string
+  /** Machine-readable failure code; present when !ok. */
+  errorCode?: string
+}
+
+export function validateFileResultBody(body: unknown): asserts body is FileResultBody {
+  if (!isRecord(body)) {
+    throw new Error("malformed file result: not an object")
+  }
+  if (typeof body.index !== "number" || !Number.isSafeInteger(body.index) || body.index < 0) {
+    throw new Error("malformed file result: bad index")
+  }
+  if (typeof body.ok !== "boolean") {
+    throw new Error("malformed file result: bad ok")
+  }
+  if (body.ok) {
+    if (typeof body.finalName !== "string" || body.finalName.length === 0 || body.finalName.length > APP_MAX_NAME_BYTES) {
+      throw new Error("malformed file result: bad finalName")
+    }
+    if (typeof body.bytes !== "number" || !Number.isSafeInteger(body.bytes) || body.bytes < 0) {
+      throw new Error("malformed file result: bad bytes")
+    }
+    if (typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(body.sha256)) {
+      throw new Error("malformed file result: bad sha256")
+    }
+  } else if (typeof body.errorCode !== "string" || body.errorCode.length === 0 || body.errorCode.length > 64) {
+    throw new Error("malformed file result: bad errorCode")
+  }
+}
+
+export function validateSessionResultBody(body: unknown): asserts body is { ok: boolean; error?: string } {
+  if (!isRecord(body) || typeof body.ok !== "boolean") {
+    throw new Error("malformed session result: not an object")
+  }
+  if (body.error !== undefined && (typeof body.error !== "string" || body.error.length > 512)) {
+    throw new Error("malformed session result: bad error")
+  }
+}
+
+/** Reason-coded CANCEL / ERROR / DECLINE bodies (P1-10, P1-9). */
+export function validateSignalBody(body: unknown, what: string): asserts body is { code: string; reason: string } {
+  if (!isRecord(body)) {
+    throw new Error(`malformed ${what}: not an object`)
+  }
+  if (typeof body.code !== "string" || body.code.length === 0 || body.code.length > 64) {
+    throw new Error(`malformed ${what}: bad code`)
+  }
+  if (typeof body.reason !== "string" || body.reason.length > 512) {
+    throw new Error(`malformed ${what}: bad reason`)
+  }
+}
+
+/** The receiver explicitly declined (P1-9). */
+export class TransferDeclinedError extends Error {
+  constructor(message = "transfer declined") {
+    super(message)
+    this.name = "TransferDeclinedError"
+  }
+}
+
+/** The peer sent CANCEL (P1-10). */
+export class PeerCancelledError extends Error {
+  constructor(
+    readonly code: string,
+    readonly reason: string,
+  ) {
+    super(`cancelled by peer (${code}): ${reason}`)
+    this.name = "PeerCancelledError"
+  }
+}
+
+/** The peer sent ERROR (P1-10). */
+export class PeerSignalledError extends Error {
+  constructor(
+    readonly code: string,
+    readonly reason: string,
+  ) {
+    super(`peer error (${code}): ${reason}`)
+    this.name = "PeerSignalledError"
+  }
+}
+
+/**
+ * A send failed partway (P1-11): `outcomes` carries every file that
+ * completed (ok or receiver-reported failure) before the failure, so a
+ * multi-file failure never discards completed files.
+ */
+export class SendAbortedError extends Error {
+  constructor(
+    message: string,
+    readonly outcomes: SendFileOutcome[],
+  ) {
+    super(message)
+    this.name = "SendAbortedError"
+  }
+}
+
+/** A receive failed partway (P1-11): files already saved to disk. */
+export class ReceiveAbortedError extends Error {
+  constructor(
+    message: string,
+    readonly receivedFiles: ReceivedFile[],
+  ) {
+    super(message)
+    this.name = "ReceiveAbortedError"
+  }
+}
+
+/**
+ * Read one frame and enforce the v2 wire bindings: the SessionId
+ * extension must equal our transcript-derived session id on EVERY frame
+ * (P1-12), and peer-initiated teardown frames are translated into typed
+ * errors (P1-9, P1-10) instead of "unexpected frame" failures.
+ */
 async function readFrame(
   parser: FrameParser,
+  sessionId: Uint8Array,
   signal?: AbortSignal,
 ): Promise<{ header: FrameHeader; body: Uint8Array }> {
   const outcome = await parser.readHeader(signal)
@@ -237,8 +515,30 @@ async function readFrame(
   if (outcome.kind === "rejected") {
     throw new Error(`frame rejected: ${outcome.reason}`)
   }
-  const body = await parser.readBody(outcome.header, signal)
-  return { header: outcome.header, body }
+  const { header } = outcome
+  const extSessionId = header.extension.get(ExtensionKey.SessionId)
+  if (!extSessionId || !equalBytes(extSessionId, sessionId)) {
+    throw new Error("frame session id mismatch: not our session")
+  }
+  const body = await parser.readBody(header, signal)
+  if (header.type === FrameType.Cancel) {
+    const raw: unknown = parseJsonBody(body, "cancel")
+    validateSignalBody(raw, "cancel")
+    throw new PeerCancelledError(raw.code, raw.reason)
+  }
+  if (header.type === FrameType.Error) {
+    const raw: unknown = parseJsonBody(body, "error")
+    validateSignalBody(raw, "error")
+    throw new PeerSignalledError(raw.code, raw.reason)
+  }
+  if (header.type === FrameType.Decline) {
+    const raw: unknown = parseJsonBody(body, "decline")
+    validateSignalBody(raw, "decline")
+    throw new TransferDeclinedError(
+      `transfer declined by receiver${raw.reason ? `: ${raw.reason}` : ""}`,
+    )
+  }
+  return { header, body }
 }
 
 /** Resolve a collision-free destination name: `name (1).ext`, `name (2).ext`, … */
@@ -260,18 +560,79 @@ async function resolveDestination(directory: string, peerFileName: string): Prom
   }
 }
 
-async function sha256File(path: string): Promise<{ bytes: number; sha256: string }> {
+/**
+ * Hash a file through an already-open handle (P0-2): the fstat size
+ * snapshot and the hash see the same open file description, so a
+ * replace-between-open (open TOCTOU) cannot make the hash and the later
+ * stream disagree about which file they read. Modification *between* the
+ * hash pass and the stream pass is caught by the receiver's SHA-256
+ * verification, which is the integrity backstop.
+ */
+async function hashFileHandle(handle: FileHandle, size: number): Promise<string> {
   const hash = createHash("sha256")
-  let bytes = 0
-  for await (const chunk of createReadStream(path)) {
-    hash.update(chunk)
-    bytes += (chunk as Buffer).length
+  const buf = Buffer.alloc(128 * 1024)
+  let offset = 0
+  while (offset < size) {
+    const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, size - offset), offset)
+    if (bytesRead === 0) {
+      throw new Error("file changed while reading")
+    }
+    hash.update(buf.subarray(0, bytesRead))
+    offset += bytesRead
   }
-  return { bytes, sha256: hash.digest("hex") }
+  return hash.digest("hex")
+}
+
+interface FileSnapshot {
+  handle: FileHandle
+  path: string
+  name: string
+  bytes: number
+  sha256: string
+}
+
+/** Open once, fstat for the size snapshot, hash through the same fd. */
+async function snapshotFile(path: string, name: string): Promise<FileSnapshot> {
+  const handle = await fs.open(path, "r")
+  try {
+    const st = await handle.stat()
+    if (!st.isFile()) {
+      throw new Error(`not a regular file: ${name}`)
+    }
+    const sha256 = await hashFileHandle(handle, st.size)
+    return { handle, path, name, bytes: st.size, sha256 }
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
 }
 
 function extSessionId(sessionId: Uint8Array): Map<number, Uint8Array> {
   return new Map([[ExtensionKey.SessionId, sessionId]])
+}
+
+function jsonBytes(value: unknown): Uint8Array {
+  return Buffer.from(JSON.stringify(value), "utf8")
+}
+
+/** Timeout-bounded signal for awaiting FILE_RESULT / SESSION_RESULT (P0-2):
+ *  a receiver that goes silent after FILE_END fails the send instead of
+ *  hanging it. */
+function resultSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(RESULT_TIMEOUT_MS)
+  return signal ? AbortSignal.any([signal, timeout]) : timeout
+}
+
+/** Map a receive-side failure to a wire error code (P0-2). */
+function receiveErrorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code
+  if (code === "ENOSPC") return "E_NOSPC"
+  const message = error instanceof Error ? error.message : String(error)
+  if (/sha-256|digest/i.test(message)) return "E_HASH_MISMATCH"
+  if (/exceed|too large|limit/i.test(message)) return "E_LIMIT"
+  if (/integrity/i.test(message)) return "E_INTEGRITY"
+  if (/cancel|abort/i.test(message)) return "E_CANCELLED"
+  return "E_RECEIVE_FAILED"
 }
 
 export interface SendOptions {
@@ -282,40 +643,88 @@ export interface SendOptions {
   /**
    * The receiver's complete Peer ID, verified out of band by the user.
    * If omitted, the verified Peer ID from the session proof is used
-   * (trust-on-first-use; the UI should display it). If provided, it must
-   * match exactly.
+   * (trust-on-first-use; the UI must display it AND the SAS). If provided,
+   * it must match exactly.
    */
   expectedPeerId?: string
-  /** Inject a pre-generated identity (tests). Generated fresh if omitted. */
+  /**
+   * Inject a pre-generated identity (tests). Generated fresh if omitted.
+   * P1-13: an identity must never be reused across sessions — passing an
+   * identity that already completed a session throws.
+   */
   identity?: EphemeralIdentity
   signal?: AbortSignal
   /** Progress callback for UI: (fileIndex, fileName, bytesSent, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesSent: number, fileBytes: number) => void
 }
 
-/** Sender side: dial, handshake, Gate B, Gate C, then stream files. */
-export async function sendFiles(options: SendOptions): Promise<void> {
+export interface SendFileOutcome {
+  name: string
+  bytes: number
+  sha256: string
+  ok: boolean
+  /** Receiver-reported final name (after autorename); present when ok. */
+  finalName?: string
+  /** Machine-readable failure code; present when !ok. */
+  errorCode?: string
+}
+
+export interface SendResult {
+  /** Per-file outcomes, in transfer order (P0-2). */
+  outcomes: SendFileOutcome[]
+  /** The receiver's verified Peer ID. */
+  verifiedPeerId: string
+  /** Short auth string: the UI must show it for out-of-band confirmation. */
+  sas: string
+}
+
+/** Sender side: dial, handshake, Gate B, Gate C, stream files, collect results. */
+export async function sendFiles(options: SendOptions): Promise<SendResult> {
   const { host, port, signal } = options
   const expectedPeerId = options.expectedPeerId
   if (options.files.length === 0 || options.files.length > BUDGET_MAX_FILES) {
     throw new Error(`file count must be 1-${BUDGET_MAX_FILES}`)
   }
-  // Hash and measure every file up front (bounded: 25 files).
-  const files: Array<ProtocolFile & { path: string }> = []
-  for (const f of options.files) {
-    const { bytes, sha256 } = await sha256File(f.path)
-    files.push({ path: f.path, name: f.name, bytes, sha256 })
+  // Single-fd snapshots (P0-2): open once, fstat, hash through the same fd.
+  const snapshots: FileSnapshot[] = []
+  try {
+    for (const f of options.files) {
+      snapshots.push(await snapshotFile(f.path, f.name))
+    }
+  } catch (error) {
+    for (const s of snapshots) {
+      try {
+        await s.handle.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    throw error
   }
+  const files: ProtocolFile[] = snapshots.map((s) => ({
+    name: s.name,
+    bytes: s.bytes,
+    sha256: s.sha256,
+  }))
   enforceBudgets(files, "send")
 
   const identity = options.identity ?? generateEphemeralIdentity()
+  claimIdentity(identity)
   const sessions = new SessionManager()
   let channel: NoiseChannel | null = null
+  let sessionId: Uint8Array | null = null
+  const outcomes: SendFileOutcome[] = []
+  /** Fail the whole send but keep every completed per-file outcome (P1-11). */
+  const fail = (message: string): never => {
+    throw new SendAbortedError(message, outcomes)
+  }
+
   try {
     const hs: HandshakeResult = await dialNoise(host, port, signal)
     channel = hs.channel
-    const session = sessions.createSession("sender")
-    const confirmation = transcriptConfirmation(hs.handshakeHash, session.id)
+    sessionId = sessionIdFromHandshakeHash(hs.handshakeHash)
+    const sas = sasFromHandshakeHash(hs.handshakeHash)
+    const session = sessions.createSession("sender", sessionId)
 
     // Gate B, local side: the user provided the expected Peer ID out of band,
     // or (TOFU mode) their act of choosing this peer and sending is the
@@ -324,21 +733,37 @@ export async function sendFiles(options: SendOptions): Promise<void> {
       sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
     }
 
-    // 1. SESSION_OPEN with our identity proof.
-    await channel.send(
-      encodeFrame(FrameType.SessionOpen, Buffer.from(JSON.stringify(signProof(identity, hs.handshakeHash))), extSessionId(session.id), APP_MAX_BODY),
+    const parser = new FrameParser(channel.asByteSource(signal), {
+      maxBodyLength: 64 * 1024,
+      maxBodyLengthByType: BODY_CAPS_V2,
+      headerTimeoutMs: 15_000,
+      bodyTimeoutMs: 60_000,
+    })
+    const sendFrame = (
+      type: FrameType,
+      body: Uint8Array,
+      ext: ReadonlyMap<number, Uint8Array>,
+    ): Promise<void> => channel!.send(encodeFrame(type, body, ext))
+
+    // 1. SESSION_OPEN with our v2 identity proof.
+    await sendFrame(
+      FrameType.SessionOpen,
+      jsonBytes(signProof(identity, hs.handshakeHash, "sender")),
+      extSessionId(session.id),
     )
 
     // 2. Await the receiver's IDENTITY_CONFIRM and verify their proof.
-    const parser = new FrameParser(channel.asByteSource(signal), { maxBodyLength: APP_MAX_BODY })
     parser.transitionTo("awaiting-confirm")
-    const confirm = await readFrame(parser, signal)
+    const confirm = await readFrame(parser, session.id, signal)
     if (confirm.header.type !== FrameType.IdentityConfirm) {
       throw new Error("expected identity confirmation")
     }
-    const proofBody: unknown = parseJsonBody(confirm.header, confirm.body, "identity proof")
+    const proofBody: unknown = parseJsonBody(confirm.body, "identity proof")
     validateIdentityProofBody(proofBody)
-    const verifiedPeerId = verifyProof(proofBody, hs.handshakeHash, expectedPeerId)
+    const verifiedPeerId = verifyProof(proofBody, hs.handshakeHash, expectedPeerId, {
+      expectedRole: "receiver",
+      ownPeerId: identity.peerId,
+    })
     const verifiedIdentity = new TextEncoder().encode(verifiedPeerId)
     sessions.recordIdentityConfirmation(session.id, "remote", verifiedIdentity)
     if (expectedPeerId === undefined) {
@@ -347,72 +772,181 @@ export async function sendFiles(options: SendOptions): Promise<void> {
     }
 
     // 3. Gate B complete: authorize and send the transfer request (metadata only).
-    const authorized = files.map((f) => ({ name: f.name, bytes: f.bytes, sha256: f.sha256 }))
-    const auth = sessions.authorizeTransfer(session.id, authorized)
-    const requestId = Buffer.from(createHash("sha256").update(auth.token).digest()).subarray(0, 16)
-    const requestExt = new Map([
-      [ExtensionKey.SessionId, session.id],
-      [ExtensionKey.RequestId, requestId],
-    ])
-    await channel.send(
-      encodeFrame(FrameType.TransferRequest, Buffer.from(JSON.stringify({ files: authorized })), requestExt, APP_MAX_BODY),
+    const auth = sessions.authorizeTransfer(session.id, files)
+    const requestId = createHash("sha256").update(auth.token).digest().subarray(0, 16)
+    await sendFrame(
+      FrameType.TransferRequest,
+      jsonBytes({ v: PROTOCOL_VERSION, files }),
+      new Map([
+        [ExtensionKey.SessionId, session.id],
+        [ExtensionKey.RequestId, requestId],
+      ]),
     )
 
-    // 4. Gate C: await the receiver's explicit acceptance before any file bytes.
+    // 4. Gate C: the receiver's explicit acceptance, BY REQUEST INDEX (P0-7).
     parser.transitionTo("awaiting-accept")
-    const accept = await readFrame(parser, signal)
+    const accept = await readFrame(parser, session.id, signal)
     if (accept.header.type !== FrameType.TransferAccept) {
       throw new Error("expected transfer acceptance")
     }
-    const acceptedRaw: unknown = parseJsonBody(accept.header, accept.body, "transfer acceptance")
-    if (!isRecord(acceptedRaw)) throw new Error("malformed transfer acceptance: not an object")
-    validateProtocolFiles(acceptedRaw.files, "transfer acceptance")
-    const acceptedBody = acceptedRaw as { files: ProtocolFile[] }
-    const accepted = sessions.acceptTransfer(auth, verifiedIdentity, acceptedBody.files)
+    const acceptRequestId = accept.header.extension.get(ExtensionKey.RequestId)
+    if (!acceptRequestId || !equalBytes(acceptRequestId, requestId)) {
+      throw new Error("transfer acceptance: request id mismatch")
+    }
+    const acceptedRaw: unknown = parseJsonBody(accept.body, "transfer acceptance")
+    validateTransferAcceptBody(acceptedRaw)
+    const indices = acceptedRaw.acceptedIndices
+    if (indices.length === 0) {
+      throw new Error("transfer acceptance: empty index set")
+    }
+    if (new Set(indices).size !== indices.length) {
+      throw new Error("transfer acceptance: duplicate indices")
+    }
+    const acceptedFiles: ProtocolFile[] = indices.map((i) => {
+      if (i >= files.length) {
+        throw new Error("transfer acceptance: index out of range")
+      }
+      return files[i]!
+    })
+    // The accepted subset must itself fit the budgets (P0-7).
+    enforceBudgets(acceptedFiles, "send-accepted")
+    const accepted = sessions.acceptTransfer(auth, verifiedIdentity, acceptedFiles)
+    const transferToken = Buffer.from(acceptedRaw.transferToken, "base64")
+    if (transferToken.length !== TRANSFER_TOKEN_BYTES) {
+      throw new Error("transfer acceptance: bad transfer token")
+    }
     parser.transitionTo("sending")
 
-    // 5. Stream each accepted file: header, chunks, end.
-    let fileIndex = 0
+    // 5. Stream each accepted file, then await its FILE_RESULT (P0-2).
+    //    Success is reported ONLY on a matching acknowledgement; a close
+    //    before the result, or a timeout, is a failure.
+    let fileNumber = 0
     for (const file of accepted.acceptedFiles) {
-      const local = files.find((f) => f.name === file.name && f.bytes === file.bytes && f.sha256 === file.sha256)
-      if (!local) {
+      const snap = snapshots.find(
+        (s) => s.name === file.name && s.bytes === file.bytes && s.sha256 === file.sha256,
+      )
+      if (!snap) {
         throw new Error("accepted file not in local set")
       }
-      let sentBytes = 0
-      options.onProgress?.(fileIndex, local.name, 0, local.bytes)
-      const fileId = createHash("sha256").update(auth.token).update(file.name).digest().subarray(0, 16)
+      const fileId = createHash("sha256")
+        .update(session.id)
+        .update(transferToken)
+        .update(file.name, "utf8")
+        .digest()
+        .subarray(0, 16)
+      const fileExt = new Map([
+        [ExtensionKey.SessionId, session.id],
+        [ExtensionKey.FileId, fileId],
+      ])
       const headerExt = new Map([
-        [ExtensionKey.SessionId, session.id],
-        [ExtensionKey.FileId, fileId],
-        [ExtensionKey.FileIndex, new Uint8Array([fileIndex])],
+        ...fileExt,
+        [ExtensionKey.FileIndex, new Uint8Array([fileNumber])],
+        [ExtensionKey.TransferToken, new Uint8Array(transferToken)],
       ])
-      await channel.send(
-        encodeFrame(FrameType.FileHeader, Buffer.from(JSON.stringify({ name: file.name, bytes: file.bytes, sha256: file.sha256 })), headerExt, APP_MAX_BODY),
-      )
-      for await (const chunk of createReadStream(local.path, { highWaterMark: CHUNK_BYTES })) {
-        const chunkExt = new Map([
-          [ExtensionKey.SessionId, session.id],
-          [ExtensionKey.FileId, fileId],
-        ])
-        await channel.send(encodeFrame(FrameType.FileChunk, new Uint8Array(chunk as Buffer), chunkExt, APP_MAX_BODY))
-        sentBytes += (chunk as Buffer).length
-        options.onProgress?.(fileIndex, local.name, sentBytes, local.bytes)
+      const outcome: SendFileOutcome = {
+        name: file.name,
+        bytes: file.bytes,
+        sha256: file.sha256,
+        ok: false,
       }
-      const endExt = new Map([
-        [ExtensionKey.SessionId, session.id],
-        [ExtensionKey.FileId, fileId],
-      ])
-      await channel.send(
-        encodeFrame(FrameType.FileEnd, Buffer.from(JSON.stringify({ sha256: file.sha256 })), endExt, APP_MAX_BODY),
-      )
-      fileIndex++
+      try {
+        options.onProgress?.(fileNumber, file.name, 0, file.bytes)
+        await sendFrame(
+          FrameType.FileHeader,
+          jsonBytes({ name: file.name, bytes: file.bytes, sha256: file.sha256 }),
+          headerExt,
+        )
+        const chunkBuf = Buffer.alloc(CHUNK_BYTES)
+        let sentBytes = 0
+        while (sentBytes < snap.bytes) {
+          signal?.throwIfAborted()
+          const want = Math.min(CHUNK_BYTES, snap.bytes - sentBytes)
+          const { bytesRead } = await snap.handle.read(chunkBuf, 0, want, sentBytes)
+          if (bytesRead === 0) {
+            throw new Error(`file shrank during send: ${file.name}`)
+          }
+          await sendFrame(FrameType.FileChunk, chunkBuf.subarray(0, bytesRead), fileExt)
+          sentBytes += bytesRead
+          options.onProgress?.(fileNumber, file.name, sentBytes, file.bytes)
+        }
+        await sendFrame(FrameType.FileEnd, jsonBytes({ sha256: file.sha256 }), fileExt)
+        const result = await readFrame(parser, session.id, resultSignal(signal))
+        if (result.header.type !== FrameType.FileResult) {
+          throw new Error("expected file result")
+        }
+        const resultRaw: unknown = parseJsonBody(result.body, "file result")
+        validateFileResultBody(resultRaw)
+        if (resultRaw.index !== fileNumber) {
+          throw new Error("file result: index mismatch")
+        }
+        outcome.ok = resultRaw.ok
+        outcome.finalName = resultRaw.finalName
+        outcome.errorCode = resultRaw.errorCode
+      } catch (error) {
+        if (
+          error instanceof PeerCancelledError ||
+          error instanceof PeerSignalledError ||
+          error instanceof TransferDeclinedError
+        ) {
+          throw error
+        }
+        // Local per-file failure: the session cannot continue this file, so
+        // fail the whole send — keeping every completed outcome (P1-11).
+        // The outer catch sends the peer teardown signal.
+        fail(`send failed on ${file.name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      outcomes.push(outcome)
+      fileNumber++
     }
-    // Do not close yet: wait for the receiver to consume every byte and
-    // close first (it closes on success). Our FIN only goes out after that,
-    // so a fast sender can never truncate a slow receiver.
-    await channel.waitForPeerClose(10_000)
-    void confirmation
+
+    // 6. Final session result (P0-2), then done. No waitForPeerClose: the
+    //    explicit SESSION_RESULT is the acknowledgement.
+    const sessionResult = await readFrame(parser, session.id, resultSignal(signal))
+    if (sessionResult.header.type !== FrameType.SessionResult) {
+      throw new Error("expected session result")
+    }
+    const srRaw: unknown = parseJsonBody(sessionResult.body, "session result")
+    validateSessionResultBody(srRaw)
+    if (!srRaw.ok) {
+      fail(`receiver reported session failure: ${srRaw.error ?? "unknown"}`)
+    }
+    return { outcomes, verifiedPeerId, sas }
+  } catch (error) {
+    const peerInitiated =
+      error instanceof TransferDeclinedError ||
+      error instanceof PeerCancelledError ||
+      error instanceof PeerSignalledError
+    if (!peerInitiated && channel !== null && sessionId !== null && !channel.isClosed) {
+      // Best-effort teardown signal on local abort/failure (P1-10).
+      try {
+        const type = signal?.aborted ? FrameType.Cancel : FrameType.Error
+        const code = signal?.aborted ? "local-cancel" : "E_LOCAL_ERROR"
+        await channel.send(
+          encodeFrame(
+            type,
+            jsonBytes({ code, reason: error instanceof Error ? error.message : String(error) }),
+            extSessionId(sessionId),
+          ),
+        )
+      } catch {
+        /* best effort */
+      }
+    }
+    if (error instanceof SendAbortedError || peerInitiated) {
+      throw error
+    }
+    throw new SendAbortedError(error instanceof Error ? error.message : String(error), outcomes)
   } finally {
+    if (sessionId !== null) {
+      sessions.destroySession(sessionId)
+    }
+    for (const s of snapshots) {
+      try {
+        await s.handle.close()
+      } catch {
+        /* ignore */
+      }
+    }
     channel?.close()
   }
 }
@@ -423,38 +957,91 @@ export interface ReceiveOptions {
   /**
    * The sender's complete Peer ID, verified out of band by the user.
    * If omitted, the verified Peer ID from the session proof is used and the
-   * consent UI is responsible for showing it to the user (trust-on-first-use
-   * via the accept action). If provided, it must match exactly.
+   * consent UI is responsible for showing it AND the SAS to the user
+   * (trust-on-first-use via the accept action). If provided, it must match
+   * exactly.
    */
   expectedPeerId?: string
   destinationDirectory: string
-  /** Called with the verified request; returns the exact subset to accept. */
-  onTransferRequest: (request: { peerId: string; files: ProtocolFile[] }) => Promise<ProtocolFile[]>
-  /** Inject a pre-generated identity (tests). Generated fresh if omitted. */
+  /**
+   * Called with the verified request; returns the exact subset to accept.
+   * The SAS is provided so the consent screen can show it (P0-1). An empty
+   * return sends an explicit DECLINE frame (P1-9).
+   */
+  onTransferRequest: (request: {
+    peerId: string
+    files: ProtocolFile[]
+    sas: string
+  }) => Promise<ProtocolFile[]>
+  /**
+   * Inject a pre-generated identity (tests). Generated fresh if omitted.
+   * P1-13: an identity must never be reused across sessions.
+   */
   identity?: EphemeralIdentity
   signal?: AbortSignal
   /** Progress callback for UI: (fileIndex, fileName, bytesReceived, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => void
 }
 
-/** Receiver side: verify, Gate B, present request, Gate C, then receive. */
-export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFile[]> {
-  const { channel, handshakeHash, expectedPeerId, destinationDirectory, onTransferRequest, signal } = options
-  const identity = options.identity ?? generateEphemeralIdentity()
-  const sessions = new SessionManager()
-  const received: ReceivedFile[] = []
-  try {
-    const session = sessions.createSession("receiver")
-    const parser = new FrameParser(channel.asByteSource(signal), { maxBodyLength: APP_MAX_BODY })
+export interface ReceiveResult {
+  files: ReceivedFile[]
+  verifiedPeerId: string
+  /** Short auth string: the UI must show it for out-of-band confirmation. */
+  sas: string
+}
 
-    // 1. SESSION_OPEN: verify the sender's identity proof before anything else.
-    const open = await readFrame(parser, signal)
+/** Receiver side: verify, Gate B, present request, Gate C, receive, acknowledge. */
+export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResult> {
+  const { channel, handshakeHash, destinationDirectory, onTransferRequest, signal } = options
+  const identity = options.identity ?? generateEphemeralIdentity()
+  claimIdentity(identity)
+  const sessions = new SessionManager()
+  const sessionId = sessionIdFromHandshakeHash(handshakeHash)
+  const sas = sasFromHandshakeHash(handshakeHash)
+  const session = sessions.createSession("receiver", sessionId)
+  const received: ReceivedFile[] = []
+  /** Fail the whole receive but keep every file already saved (P1-11). */
+  const fail = (message: string): never => {
+    throw new ReceiveAbortedError(message, received)
+  }
+
+  const parser = new FrameParser(channel.asByteSource(signal), {
+    maxBodyLength: 64 * 1024,
+    maxBodyLengthByType: BODY_CAPS_V2,
+    headerTimeoutMs: 15_000,
+    bodyTimeoutMs: 60_000,
+  })
+  const sendFrame = (
+    type: FrameType,
+    body: Uint8Array,
+    ext: ReadonlyMap<number, Uint8Array>,
+  ): Promise<void> => channel.send(encodeFrame(type, body, ext))
+  /** Best-effort peer teardown signal (P1-10). */
+  const signalPeer = async (
+    type: FrameType,
+    code: string,
+    reason: string,
+  ): Promise<void> => {
+    if (channel.isClosed) return
+    try {
+      await channel.send(encodeFrame(type, jsonBytes({ code, reason }), extSessionId(session.id)))
+    } catch {
+      /* best effort */
+    }
+  }
+
+  try {
+    // 1. SESSION_OPEN: verify the sender's v2 identity proof before anything else.
+    const open = await readFrame(parser, session.id, signal)
     if (open.header.type !== FrameType.SessionOpen) {
       throw new Error("expected session open")
     }
-    const senderProofBody: unknown = parseJsonBody(open.header, open.body, "identity proof")
+    const senderProofBody: unknown = parseJsonBody(open.body, "identity proof")
     validateIdentityProofBody(senderProofBody)
-    const verifiedSenderId = verifyProof(senderProofBody, handshakeHash, options.expectedPeerId)
+    const verifiedSenderId = verifyProof(senderProofBody, handshakeHash, options.expectedPeerId, {
+      expectedRole: "sender",
+      ownPeerId: identity.peerId,
+    })
     const senderIdentity = new TextEncoder().encode(verifiedSenderId)
     // Gate B, local side: with an out-of-band expected ID it was provided up
     // front; in TOFU mode the user's accept action in onTransferRequest is
@@ -465,101 +1052,238 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceivedFil
     sessions.recordIdentityConfirmation(session.id, "remote", senderIdentity)
     parser.transitionTo("handshake")
 
-    // 2. IDENTITY_CONFIRM with our own proof.
-    await channel.send(
-      encodeFrame(FrameType.IdentityConfirm, Buffer.from(JSON.stringify(signProof(identity, handshakeHash))), extSessionId(session.id), APP_MAX_BODY),
+    // 2. IDENTITY_CONFIRM with our own v2 proof.
+    await sendFrame(
+      FrameType.IdentityConfirm,
+      jsonBytes(signProof(identity, handshakeHash, "receiver")),
+      extSessionId(session.id),
     )
     parser.transitionTo("identity-confirmed")
 
     // 3. TRANSFER_REQUEST: metadata only, no bytes flow yet.
-    const request = await readFrame(parser, signal)
+    const request = await readFrame(parser, session.id, signal)
     if (request.header.type !== FrameType.TransferRequest) {
       throw new Error("expected transfer request")
     }
-    const requestRaw: unknown = parseJsonBody(request.header, request.body, "transfer request")
+    const requestRaw: unknown = parseJsonBody(request.body, "transfer request")
     if (!isRecord(requestRaw)) throw new Error("malformed transfer request: not an object")
+    if (requestRaw.v !== undefined && requestRaw.v !== PROTOCOL_VERSION) {
+      throw new Error("transfer request: unsupported protocol version")
+    }
     validateProtocolFiles(requestRaw.files, "transfer request")
-    const requestBody = requestRaw as { files: ProtocolFile[] }
+    const requestFiles = requestRaw.files as ProtocolFile[]
     // Mirror the sender budgets on the receiver: a malicious sender must
     // not be able to make us authorize an over-budget session.
-    enforceBudgets(requestBody.files, "receive")
+    enforceBudgets(requestFiles, "receive")
+    const requestId = request.header.extension.get(ExtensionKey.RequestId)
+    if (!requestId || requestId.length === 0) {
+      throw new Error("transfer request: missing request id")
+    }
     parser.transitionTo("request-review")
 
     // 4. Gate C: the user's explicit, separate acceptance of the exact set.
-    // In TOFU mode (no out-of-band expected ID), the user's accept action is
-    // also the local Gate B confirmation — recorded before authorizing.
-    const accepted = await onTransferRequest({ peerId: verifiedSenderId, files: requestBody.files })
+    let accepted: ProtocolFile[]
+    try {
+      accepted = await onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas })
+    } catch (error) {
+      await signalPeer(
+        FrameType.Error,
+        "E_CONSENT_FAILED",
+        error instanceof Error ? error.message : String(error),
+      )
+      throw error
+    }
     if (options.expectedPeerId === undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", senderIdentity)
     }
-    const auth = sessions.authorizeTransfer(session.id, requestBody.files)
-    const acceptedTransfer = sessions.acceptTransfer(auth, senderIdentity, accepted)
-    const requestId = request.header.extension.get(ExtensionKey.RequestId) ?? new Uint8Array(0)
-    const acceptExt = new Map([
-      [ExtensionKey.SessionId, session.id],
-      [ExtensionKey.RequestId, requestId],
-    ])
-    await channel.send(
-      encodeFrame(FrameType.TransferAccept, Buffer.from(JSON.stringify({ files: acceptedTransfer.acceptedFiles })), acceptExt, APP_MAX_BODY),
+    if (accepted.length === 0) {
+      // Explicit DECLINE frame instead of decline-as-exception (P1-9).
+      await sendFrame(
+        FrameType.Decline,
+        jsonBytes({ code: "declined", reason: "declined by user" }),
+        extSessionId(session.id),
+      )
+      throw new TransferDeclinedError("transfer declined by user")
+    }
+    const auth = sessions.authorizeTransfer(session.id, requestFiles)
+    // Map the accepted subset to REQUEST INDICES (P0-7): the wire carries
+    // indices only, so a malicious receiver cannot make the sender
+    // re-stream by repeating entries — duplicates are rejected here.
+    const seen = new Set<number>()
+    const acceptedIndices: number[] = []
+    for (const f of accepted) {
+      const i = requestFiles.findIndex(
+        (r) => r.name === f.name && r.bytes === f.bytes && r.sha256 === f.sha256,
+      )
+      if (i < 0) {
+        throw new Error("accepted file was not in the request")
+      }
+      if (seen.has(i)) {
+        throw new Error("duplicate accepted file")
+      }
+      seen.add(i)
+      acceptedIndices.push(i)
+    }
+    const acceptedTransfer = sessions.acceptTransfer(
+      auth,
+      senderIdentity,
+      acceptedIndices.map((i) => requestFiles[i]!),
+    )
+    // Receiver-issued transfer token (P1-12): echoed on every FILE_HEADER,
+    // binding the file stream to this Gate C decision.
+    const transferToken = new Uint8Array(TRANSFER_TOKEN_BYTES)
+    getRandomValues(transferToken)
+    await sendFrame(
+      FrameType.TransferAccept,
+      jsonBytes({
+        acceptedIndices,
+        transferToken: Buffer.from(transferToken).toString("base64"),
+      }),
+      new Map([
+        [ExtensionKey.SessionId, session.id],
+        [ExtensionKey.RequestId, requestId],
+      ]),
     )
     parser.transitionTo("receiving")
 
-    // 5. Receive each file into the safe sink with autorename on collision.
-    let fileIndex = 0
+    // 5. Receive each file into the safe sink, acknowledging each one
+    //    with FILE_RESULT — including failures with error codes (P0-2).
+    let fileNumber = 0
     for (const file of acceptedTransfer.acceptedFiles) {
-      const header = await readFrame(parser, signal)
+      const header = await readFrame(parser, session.id, signal)
       if (header.header.type !== FrameType.FileHeader) {
         throw new Error("expected file header")
       }
-      const fileMetaRaw: unknown = parseJsonBody(header.header, header.body, "file header")
+      const fileMetaRaw: unknown = parseJsonBody(header.body, "file header")
       validateProtocolFiles([fileMetaRaw], "file header")
       const fileMeta = fileMetaRaw as ProtocolFile
-      if (fileMeta.sha256 !== file.sha256 || fileMeta.bytes !== file.bytes) {
+      if (fileMeta.sha256 !== file.sha256 || fileMeta.bytes !== file.bytes || fileMeta.name !== file.name) {
         throw new Error("file header does not match the accepted file")
       }
-      const fileId = header.header.extension.get(ExtensionKey.FileId)
+      const fileIndexExt = header.header.extension.get(ExtensionKey.FileIndex)
+      if (!fileIndexExt || fileIndexExt.length !== 1 || fileIndexExt[0] !== fileNumber) {
+        throw new Error("file header: file index mismatch")
+      }
+      const tokenExt = header.header.extension.get(ExtensionKey.TransferToken)
+      if (!tokenExt || !equalBytes(tokenExt, transferToken)) {
+        throw new Error("file header: transfer token mismatch")
+      }
+      const fileIdExt = header.header.extension.get(ExtensionKey.FileId)
+      if (!fileIdExt || fileIdExt.length === 0) {
+        throw new Error("file header: missing file id")
+      }
+      const fileId: Uint8Array = fileIdExt
       const destinationName = await resolveDestination(destinationDirectory, file.name)
 
+      let sawFileEnd = false
       async function* chunks(): AsyncGenerator<Uint8Array> {
         let receivedBytes = 0
         for (;;) {
-          const frame = await readFrame(parser, signal)
+          const frame = await readFrame(parser, session.id, signal)
           if (frame.header.type === FrameType.FileEnd) {
-            const endRaw: unknown = parseJsonBody(frame.header, frame.body, "file end")
+            const endRaw: unknown = parseJsonBody(frame.body, "file end")
             validateSha256Body(endRaw)
-            const endBody = endRaw
-            if (endBody.sha256 !== file.sha256) {
+            if (endRaw.sha256 !== file.sha256) {
               throw new Error("file end hash mismatch")
             }
+            sawFileEnd = true
             return
           }
           if (frame.header.type !== FrameType.FileChunk) {
             throw new Error(`unexpected frame during file receive: 0x${frame.header.type.toString(16)}`)
           }
           const chunkFileId = frame.header.extension.get(ExtensionKey.FileId)
-          if (!fileId || !chunkFileId || !equalBytes(fileId, chunkFileId)) {
+          if (!chunkFileId || !equalBytes(fileId, chunkFileId)) {
             throw new Error("chunk for wrong file")
           }
           receivedBytes += frame.body.length
-          options.onProgress?.(fileIndex, file.name, receivedBytes, file.bytes)
+          options.onProgress?.(fileNumber, file.name, receivedBytes, file.bytes)
           yield frame.body
         }
       }
 
-      const result = await receiveToFile(chunks(), {
-        destinationDirectory,
-        peerFileName: destinationName,
-        maxBytes: 2 * 1024 * 1024 * 1024,
-        maxNameBytes: APP_MAX_NAME_BYTES,
-        expectedBytes: file.bytes,
-        expectedSha256: file.sha256,
-        signal,
-      })
-      received.push({ name: result.name, bytes: result.bytes, sha256: result.sha256, path: result.path })
-      fileIndex++
+      try {
+        const result = await receiveToFile(chunks(), {
+          destinationDirectory,
+          peerFileName: destinationName,
+          maxBytes: BUDGET_MAX_FILE_BYTES,
+          maxNameBytes: APP_MAX_NAME_BYTES,
+          expectedBytes: file.bytes,
+          expectedSha256: file.sha256,
+          signal,
+        })
+        received.push({ name: result.name, bytes: result.bytes, sha256: result.sha256, path: result.path })
+        await sendFrame(
+          FrameType.FileResult,
+          jsonBytes({
+            index: fileNumber,
+            ok: true,
+            finalName: result.name,
+            bytes: result.bytes,
+            sha256: result.sha256,
+          }),
+          extSessionId(session.id),
+        )
+      } catch (error) {
+        const errorCode = receiveErrorCode(error)
+        if (sawFileEnd) {
+          // The sender's stream is at a file boundary (hash/size check
+          // failed at finalize): report and continue with the next file.
+          await sendFrame(
+            FrameType.FileResult,
+            jsonBytes({ index: fileNumber, ok: false, errorCode }),
+            extSessionId(session.id),
+          )
+        } else {
+          // Mid-stream failure: the byte stream is out of sync and the
+          // sender would deadlock on backpressure, so a teardown frame ends
+          // the session instead (CANCEL on local abort, ERROR otherwise).
+          await signalPeer(
+            signal?.aborted ? FrameType.Cancel : FrameType.Error,
+            signal?.aborted ? "local-cancel" : errorCode,
+            error instanceof Error ? error.message : String(error),
+          )
+          fail(`receive failed on ${file.name}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      fileNumber++
     }
-    return received
+
+    // 6. Final session result, then close. The sender's SESSION_RESULT read
+    //    is its explicit acknowledgement (P0-2).
+    await sendFrame(
+      FrameType.SessionResult,
+      jsonBytes({ ok: true, filesReceived: received.length }),
+      extSessionId(session.id),
+    )
+    return { files: received, verifiedPeerId: verifiedSenderId, sas }
+  } catch (error) {
+    const peerInitiated =
+      error instanceof TransferDeclinedError ||
+      error instanceof PeerCancelledError ||
+      error instanceof PeerSignalledError
+    if (!peerInitiated && !channel.isClosed) {
+      // Best-effort teardown signal on local abort/failure (P1-10).
+      try {
+        const type = signal?.aborted ? FrameType.Cancel : FrameType.Error
+        const code = signal?.aborted ? "local-cancel" : "E_LOCAL_ERROR"
+        await channel.send(
+          encodeFrame(
+            type,
+            jsonBytes({ code, reason: error instanceof Error ? error.message : String(error) }),
+            extSessionId(session.id),
+          ),
+        )
+      } catch {
+        /* best effort */
+      }
+    }
+    if (error instanceof ReceiveAbortedError || peerInitiated) {
+      throw error
+    }
+    throw new ReceiveAbortedError(error instanceof Error ? error.message : String(error), received)
   } finally {
+    sessions.destroySession(session.id)
     channel.close()
   }
 }
@@ -574,3 +1298,4 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
 // Re-exports for tests and future UI wiring.
 export { dialNoise, listenNoise, DEFAULT_PORT } from "./transport.js"
 export { generateEphemeralIdentity, peerIdFromPublicKey, verifyPeerId } from "./peer-id.js"
+export { NOISE_PROLOGUE_V2, MAX_NOISE_MESSAGE_BYTES, MAX_NOISE_PLAINTEXT_BYTES } from "./noise.js"
