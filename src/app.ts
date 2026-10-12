@@ -166,7 +166,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   }
 
   function openSendReview(): void {
-    if (stagedEntries().length === 0) {
+    // Real mode sends from the Local pane's staged set regardless of focus;
+    // the Receiver pane lists peers, not sendable files.
+    const pane = mode === "real" ? "local" : state.activePane
+    if (stagedEntries(pane).length === 0) {
       state.status = "Nothing staged in this folder · Space selects a file"
       render()
       return
@@ -645,7 +648,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         }
         createIncomingRequest()
         return
-      case "d": openDiff(); return
+      case "d":
+        if (mode === "real") {
+          state.status = "Diff is not available in real mode"
+          render()
+          return
+        }
+        openDiff(); return
       case "q":
         if (mode === "real") {
           state.status = "Peer list is in the Receiver pane · Tab to switch, ↑/↓ to choose"
@@ -767,6 +776,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
    * Real-mode wiring: live discovery peers, real send/receive. The mock
    * simulation paths above are untouched; this only activates in real mode.
    */
+  let realPeerSyncTimer: ReturnType<typeof setInterval> | null = null
   function setupRealMode(real: RealTransport): void {
     // Map discovered peers onto the peer-list shape the UI already renders.
     const syncPeers = () => {
@@ -834,34 +844,47 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
 
     // Background receive loop: one session at a time (per the budget).
+    // A top-level catch keeps one bad iteration from silently ending all
+    // listening; the loop itself only exits when the app is disposed.
     const receiveLoop = async () => {
-      for await (const hs of real.listener.accept()) {
-        if (disposed) break
-        try {
-          state.status = "Incoming connection · verifying identity…"
+      try {
+        for await (const hs of real.listener.accept()) {
+          if (disposed) break
+          try {
+            state.status = "Incoming connection · verifying identity…"
+            render()
+            const received = await receiveFiles({
+              channel: hs.channel,
+              handshakeHash: hs.handshakeHash,
+              // No out-of-band expected ID: the consent screen shows the
+              // verified Peer ID and the user's accept is the confirmation.
+              destinationDirectory: real.receiveDirectory,
+              identity: real.identity,
+              onTransferRequest: pendingConsent,
+              onProgress: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => {
+                state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
+                render()
+              },
+            })
+            state.status = `Received ${received.length} file(s) → ${real.receiveDirectory}`
+          } catch (error) {
+            state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
+          }
           render()
-          const received = await receiveFiles({
-            channel: hs.channel,
-            handshakeHash: hs.handshakeHash,
-            // No out-of-band expected ID: the consent screen shows the
-            // verified Peer ID and the user's accept is the confirmation.
-            destinationDirectory: real.receiveDirectory,
-            identity: real.identity,
-            onTransferRequest: pendingConsent,
-            onProgress: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => {
-              state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
-              render()
-            },
-          })
-          state.status = `Received ${received.length} file(s) → ${real.receiveDirectory}`
-        } catch (error) {
-          state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
         }
+      } catch (error) {
+        // Listener-level failure: surface it instead of going silently deaf.
+        state.status = `Receive loop failed: ${error instanceof Error ? error.message : String(error)}`
         render()
       }
     }
-    void receiveLoop()
-    void peerTimer
+    void receiveLoop().catch((error) => {
+      state.status = `Receive loop crashed: ${error instanceof Error ? error.message : String(error)}`
+      render()
+    })
+    // The peer-sync interval must be cleared on dispose, or it keeps the
+    // process alive after the TUI closes.
+    realPeerSyncTimer = peerTimer
   }
 
   /**
@@ -876,7 +899,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       render()
       return
     }
-    const files = stagedEntries().filter((e) => e.kind === "file")
+    const files = stagedEntries("local").filter((e) => e.kind === "file")
     const destination = peer()
     if (files.length === 0) {
       state.status = "Stage at least one file first · Space selects"
@@ -889,6 +912,8 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       return
     }
     const fileList = files.map((f) => ({ path: f.id, name: f.name }))
+    // Capture exactly what is being sent; only these IDs leave the staged set.
+    const sentIds = new Set(files.map((f) => f.id))
     state.status = `Connecting to ${destination.name} (${destination.host}:${destination.port})…`
     // Stay on the workspace screen: progress flows through the status line.
     // (The transfer screen is mock-driven and would show "No transfer is active.")
@@ -910,8 +935,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         },
       })
       state.status = `Sent ${fileList.length} file(s) to ${destination.name}`
-      // Clear staged after successful send (active pane, matching stagedEntries).
-      state.staged[state.activePane].clear()
+      // Remove only the files that were sent; anything staged elsewhere
+      // (other folders, re-staged mid-send) stays.
+      for (const id of sentIds) state.staged.local.delete(id)
     } catch (error) {
       state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
     } finally {
@@ -954,6 +980,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         dependencies.real.aborter.abort()
       } catch {
         // Best effort; the process is exiting anyway.
+      }
+      if (realPeerSyncTimer) {
+        clearInterval(realPeerSyncTimer)
+        realPeerSyncTimer = null
       }
     }
     clock.dispose()

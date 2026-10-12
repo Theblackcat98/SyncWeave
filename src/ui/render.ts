@@ -201,8 +201,10 @@ function renderPane(data: RenderData, pane: Pane, paneWidth: number, height: num
     const focused = state.activePane === pane && index === cursor
     const selected = state.staged[pane].has(entry.id)
     const icon = entry.kind === "directory" ? icons.directory : entry.name.endsWith(".gz") ? icons.archive : icons.file
+    // Real mode has no sync-state model; the mock SYNC badge would lie.
+    const realMode = data.mode === "real"
     const stateLabel = entry.kind === "directory" ? "" : ({ synced: "SYNC", added: "NEW", modified: "EDIT", deleted: "DEL" } as const)[entry.state]
-    const left = `${selected ? icons.check : " "} ${stateGlyph(entry.state)} ${icon} `
+    const left = `${selected ? icons.check : " "} ${realMode ? "" : `${stateGlyph(entry.state)} `}${icon} `
     const right = ` ${entry.kind === "directory" ? "DIR" : formatBytes(entry.bytes).padStart(7)}`
     const nameWidth = Math.max(8, paneWidth - left.length - right.length - 7)
     const row = panel(renderer, `${pane}-entry-${entry.id}`, {
@@ -215,7 +217,7 @@ function renderPane(data: RenderData, pane: Pane, paneWidth: number, height: num
     })
     row.add(label(renderer, `${pane}-entry-state-${entry.id}`, left, focused ? theme.color.white : stateColor(entry.state)))
     row.add(label(renderer, `${pane}-entry-name-${entry.id}`, truncate(entry.name, nameWidth), focused ? theme.color.white : theme.color.text))
-    const meta = entry.kind === "directory" ? "DIR" : `${right.slice(1)} ${stateLabel}`
+    const meta = entry.kind === "directory" ? "DIR" : realMode ? right.slice(1) : `${right.slice(1)} ${stateLabel}`
     row.add(label(renderer, `${pane}-entry-meta-${entry.id}`, truncate(` ${meta}`, 16), stateColor(entry.state)))
     paneBox.add(row)
   })
@@ -307,12 +309,10 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
     ? `  ${stagedCount} staged · ${formatBytes(stagedBytes)} ${state.activePane} · ${status}`
     : `  ${stagedCount} staged  ·  ${formatBytes(stagedBytes)} in ${state.activePane}  ·  ${state.status}`
   activity.add(label(renderer, "activity-summary", truncate(firstLine, Math.max(12, width - 6)), stagedCount ? theme.color.focus : theme.color.muted))
-  if (!compact) {
+  if (!compact && data.mode !== "real") {
     const legend = narrow
       ? `  ${icons.synced} sync  ${icons.added} add  ${icons.modified} edit  ${icons.deleted} del`
-      : data.mode === "real"
-        ? `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted`
-        : `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted  ·  0 network connections`
+      : `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted  ·  0 network connections`
     activity.add(label(renderer, "activity-legend", truncate(legend, Math.max(12, width - 6)), theme.color.dim))
   }
   parent.add(activity)
@@ -320,10 +320,12 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
 
 function renderSendReview(parent: BoxRenderable, data: RenderData, width: number): void {
   const { renderer, state, filesystem, actions, peers, mode } = data
-  const files = filesystem.list(state.activePane, state.paths[state.activePane]).filter((entry) => state.staged[state.activePane].has(entry.id))
+  // Real mode always sends from the Local staged set, regardless of focus.
+  const sendPane = mode === "real" ? "local" : state.activePane
+  const files = filesystem.list(sendPane, state.paths[sendPane]).filter((entry) => state.staged[sendPane].has(entry.id))
   const peer = peers[state.peerIndex % Math.max(1, peers.length)]
   const card = pageCard(renderer, "send-review", "Review outgoing files", theme.color.focus, state.revealFrame)
-  card.add(label(renderer, "send-direction", `${state.activePane === "local" ? "Local" : "Remote"} → ${peer?.name ?? "no peer selected"}`, theme.color.remote))
+  card.add(label(renderer, "send-direction", `${sendPane === "local" ? "Local" : "Remote"} → ${peer?.name ?? "no peer selected"}`, theme.color.remote))
   if (mode !== "real") {
     card.add(label(renderer, "send-mock-note", "Mock preview only · no files or network requests are sent.", theme.color.warning))
   }
@@ -370,8 +372,12 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
   const focused = request.files[state.selectedConsentFile]
   card.add(actionRow(renderer, "consent-file-options", [
     actionButton(renderer, "toggle-selected", `${focused?.accepted ? "Skip" : "Include"} file · Space`, "toggle-consent", actions.command, { fg: theme.color.warning }),
-    actionButton(renderer, "rename-selected", `${focused?.renamed ? "Undo rename" : "Rename"} · R`, "rename-consent", actions.command, { fg: theme.color.remote }),
-    actionButton(renderer, "destination-select", "Destination · D", "cycle-destination", actions.command, { fg: theme.color.muted }),
+    // Rename and Destination are mock-era controls with no real effect;
+    // hide them in real mode.
+    ...(request.mode === "incoming" ? [] : [
+      actionButton(renderer, "rename-selected", `${focused?.renamed ? "Undo rename" : "Rename"} · R`, "rename-consent", actions.command, { fg: theme.color.remote }),
+      actionButton(renderer, "destination-select", "Destination · D", "cycle-destination", actions.command, { fg: theme.color.muted }),
+    ]),
   ], width < theme.layout.veryNarrowWidth))
   card.add(label(renderer, "consent-separation", "Per-transfer choice only · Favorites and manual fingerprint comparison do not grant consent.", theme.color.dim))
   card.add(actionRow(renderer, "consent-actions", [
