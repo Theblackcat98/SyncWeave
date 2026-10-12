@@ -1001,7 +1001,8 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
     const session = sessions.createSession("sender", sessionId)
 
     // Gate B, local side: the user provided the expected Peer ID out of band,
-    // or (TOFU mode) their confirmation is recorded after the SAS gate below.
+    // or (no expected ID: the normal real-mode path) the user's SAS
+    // confirmation below is the local confirmation. Nothing is pinned.
     if (expectedPeerId !== undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(expectedPeerId))
     }
@@ -1065,7 +1066,7 @@ export async function sendFiles(options: SendOptions): Promise<SendResult> {
       }
     }
     if (expectedPeerId === undefined) {
-      // TOFU mode: the confirmed SAS (or the send action, without a gate) is the local confirmation.
+      // No expected ID: the confirmed SAS (or the send action, without a gate) is the local confirmation.
       sessions.recordIdentityConfirmation(session.id, "local", verifiedIdentity)
     }
 
@@ -1390,8 +1391,8 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     })
     const senderIdentity = new TextEncoder().encode(verifiedSenderId)
     // Gate B, local side: with an out-of-band expected ID it was provided up
-    // front; in TOFU mode the user's accept action in onTransferRequest is
-    // the local confirmation, recorded after they approve.
+    // front; otherwise the user's accept action in onTransferRequest (after
+    // comparing the SAS) is the local confirmation, recorded after they approve.
     if (options.expectedPeerId !== undefined) {
       sessions.recordIdentityConfirmation(session.id, "local", new TextEncoder().encode(options.expectedPeerId))
     }

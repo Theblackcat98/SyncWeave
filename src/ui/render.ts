@@ -1,5 +1,6 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
 import type { AppMode, AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
+import { previewSavedName } from "../services/safe-receive-sink.js"
 import { formatBytes } from "../domain.js"
 import type { FileSystemService, PeerService } from "../services/ports.js"
 import { icons, motion, theme } from "../theme.js"
@@ -602,7 +603,14 @@ function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number,
   })
   const checkbox = file.accepted ? icons.check : "[ ]"
   // A rename preview is a mock-only affordance; real transfers keep the sender's name.
-  const name = file.renamed && mode !== "real" ? renamePreview(file.name) : file.name
+  let name = file.renamed && mode !== "real" ? renamePreview(file.name) : file.name
+  if (mode === "real") {
+    // Show what the sink will actually write (P0-12): sanitizing can change
+    // the name, and a rejected name must be visible before accepting.
+    const saved = previewSavedName(file.name)
+    if (saved === null) name = `${file.name} (name will be rejected)`
+    else if (saved !== file.name) name = `${file.name} → saved as ${saved}`
+  }
   const size = `  ${formatBytes(file.bytes)}`
   const nameBudget = Math.max(4, inner - Bun.stringWidth(` ${checkbox} `) - Bun.stringWidth(size))
   row.add(label(renderer, `consent-check-${index}`, ` ${checkbox} `, file.accepted ? theme.color.success : theme.color.muted))

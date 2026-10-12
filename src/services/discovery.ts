@@ -154,7 +154,8 @@ export function parseAnnouncement(data: Uint8Array): Announcement | null {
   if (!isValidPeerId(peerId)) {
     return null
   }
-  // "manual:" is a reserved local namespace (never expires, TOFU on send).
+  // "manual:" is a reserved local namespace (never expires; identity is
+  // confirmed by SAS on send).
   // A network announcement must not be able to claim it.
   if (peerId.startsWith("manual:")) {
     return null
@@ -341,7 +342,7 @@ export class DiscoveryService {
   /**
    * Seed a manually-entered peer (e.g. from --peer). Manual peers never
    * expire and are marked with a `manual:` peerId prefix. Their Peer ID is
-   * unknown until a transfer verifies it (TOFU on send).
+   * unknown until a transfer verifies it (SAS comparison on send).
    */
   addManualPeer(peer: DiscoveredPeer): void {
     // Validate at the trust boundary: callers build these from CLI input.

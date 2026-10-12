@@ -1,7 +1,7 @@
 /**
  * Application-layer frame parser for the Phase 2 direct-transfer protocol.
  *
- * Implements the phase2.md "Receiver parser: state-first, header-before-body"
+ * Implements the docs/history/phase2.md "Receiver parser: state-first, header-before-body"
  * requirement as transport-agnostic, testable code. This module defines the
  * application framing only; it does not select a transport, perform discovery,
  * authenticate peers, or send bytes. A hostile sender can always transmit

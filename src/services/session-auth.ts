@@ -3,7 +3,7 @@ import { PEER_ID_LENGTH } from "./peer-id.js"
 
 /**
  * Ephemeral, memory-only session authorization for the Phase 2 direct-transfer
- * profile (see phase2.md: "Conditionally selected MVP profile" and
+ * profile (see docs/history/phase2.md: "Conditionally selected MVP profile" and
  * "Protocol-agnostic session authorization gates").
  *
  * Model:

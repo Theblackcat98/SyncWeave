@@ -513,6 +513,18 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     render()
   }
 
+  let showHiddenFiles = true
+  function toggleHiddenFiles(): void {
+    const fs = filesystem as FileSystemService & { setShowHidden?: (show: boolean) => void }
+    if (!fs.setShowHidden) return
+    showHiddenFiles = !showHiddenFiles
+    fs.setShowHidden(showHiddenFiles)
+    state.cursors.local = 0
+    state.scrollOffsets.local = 0
+    state.status = showHiddenFiles ? "Showing hidden files · . hides them" : "Hiding hidden files · . shows them"
+    render()
+  }
+
   function goHomeDirectory(): void {
     state.paths.local = homedir()
     state.activePane = "local"
@@ -794,6 +806,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if (name === "return" || name === "enter") { openCurrentDirectory(); return }
     if (name === "backspace") { goParentDirectory(); return }
     if (mode === "real" && key.sequence === "~") { goHomeDirectory(); return }
+    if (mode === "real" && key.sequence === ".") { toggleHiddenFiles(); return }
     switch (name) {
       case "s": openSendReview(); return
       case "i":
@@ -877,15 +890,26 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   /** Inline path input for destination-add (issue #27). No modal widget exists
    *  in this TUI, so typed characters accumulate in state.destinationInput and
    *  the hint bar shows the buffer. Enter validates and saves; Esc cancels. */
+  let pendingDestinationCreate: string | null = null
   function handleDestinationInputKey(key: KeyEvent): void {
     const name = key.name.toLowerCase()
     if (name === "return" || name === "enter") {
       const raw = state.destinationInput ?? ""
-      const validated = validateDestinationPath(raw)
+      // A missing directory is only created after a second Enter on the
+      // same path (destinations.ts never creates silently).
+      const confirmCreate = pendingDestinationCreate === raw
+      const validated = validateDestinationPath(raw, confirmCreate ? { create: true } : {})
       if (!validated.ok) {
-        state.status = `Invalid destination: ${validated.reason} — fix it or press Esc`
+        if (validated.reason === "directory does not exist" && !confirmCreate) {
+          pendingDestinationCreate = raw
+          state.status = "Directory does not exist — press Enter again to create it, or Esc"
+        } else {
+          pendingDestinationCreate = null
+          state.status = `Invalid destination: ${validated.reason} — fix it or press Esc`
+        }
         render(); return
       }
+      pendingDestinationCreate = null
       const already = receiveDestinations.includes(validated.dir)
       receiveDestinations = addDestination(receiveDestinations, validated.dir)
       state.receiveDestinationIndex = receiveDestinations.indexOf(validated.dir)

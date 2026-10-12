@@ -16,12 +16,12 @@ import { readFileSync } from "node:fs"
 
 const LCOV_PATH = "coverage/lcov.info"
 
-/** Whole-suite floors, in percent. Measured: lines 90.32, functions 86.10. */
-const GLOBAL_FLOORS = { lines: 89, functions: 85 }
+/** Whole-suite floors, in percent. Measured: lines 94.94, functions 91.83 (round 2). */
+const GLOBAL_FLOORS = { lines: 93, functions: 90 }
 
 /** Per-file floors, in percent. Measured on 2026-10-12 in parentheses. */
 const FILE_FLOORS: Record<string, { lines?: number; functions?: number }> = {
-  "src/app.ts": { lines: 44 }, // (44.93)
+  "src/app.ts": { lines: 70 }, // (72.38 after remediation round 2)
   "src/services/transport.ts": { lines: 91 }, // (91.84)
   "src/services/transfer-protocol.ts": { lines: 99 }, // (100.00)
 }

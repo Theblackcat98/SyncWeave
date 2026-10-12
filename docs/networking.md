@@ -98,6 +98,7 @@ Other frames:
 | Noise handshake | 60 s | Covers the whole handshake, from accept or dial. |
 | Frame header | 15 s | Applies to each header read. |
 | Frame body | 60 s | A sender that stalls mid-body is cut off. |
+| Receiver wait for the transfer request | 120 s | After identity proofs; gives the sender time to compare the security code before any metadata is sent. |
 | Receiver consent | 60 s | After the request is shown. |
 | Sender wait for acceptance | 75 s | Longer than the consent window, so a late but valid accept is not lost. |
 | Waiting for file and session results | 60 s | Own deadline, separate from the frame-header timeout. |

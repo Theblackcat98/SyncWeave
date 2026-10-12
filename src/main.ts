@@ -170,6 +170,15 @@ if (!realMode) {
     })
   }
 
+  // Every persisted destination can hold orphaned partials, not just
+  // ~/Downloads (swept above).
+  const receiveDestinations = loadDestinations(receiveDirectory)
+  for (const dir of receiveDestinations) {
+    if (dir === receiveDirectory) continue
+    const swept = await sweepOrphanPartials(dir)
+    if (swept > 0) logEvent("startup-sweep", `removed ${swept} orphaned partial file(s) in ${dir}`)
+  }
+
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
   logEvent("session-start", `real mode alias=${alias} port=${tcpPort} bind=${bindAddr}`)
   const real: RealTransport = {
@@ -194,7 +203,7 @@ if (!realMode) {
     transferService: new NullTransferService(),
     // Persisted across restarts via destinations.json; ~/Downloads is
     // always the default (first) entry.
-    receiveDestinations: loadDestinations(receiveDirectory),
+    receiveDestinations,
     mode: "real",
     real,
   })
