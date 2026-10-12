@@ -7,6 +7,7 @@ import type { EphemeralIdentity } from "./services/peer-id.js"
 import { listenNoise } from "./services/transport.js"
 import { receiveFiles, sendFiles } from "./services/transfer-protocol.js"
 import type { DiscoveryService, DiscoveredPeer } from "./services/discovery.js"
+import { logEvent } from "./services/diagnostic-log.js"
 type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
 import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
 import { motion } from "./theme.js"
@@ -513,6 +514,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         state.request = null
         setScreen("workspace")
         state.status = `Accepted ${accepted.length} file(s) · receiving…`
+        logEvent("consent-accept", `${accepted.length} file(s)`)
         render()
         resolve(accepted)
         return
@@ -523,6 +525,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         state.request = null
         setScreen("workspace")
         state.status = "Declined incoming transfer"
+        logEvent("consent-decline")
         render()
         resolve([])
         return
@@ -870,8 +873,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
               },
             })
             state.status = `Received ${received.length} file(s) → ${real.receiveDirectory}`
+            logEvent("transfer-complete", `received ${received.length} file(s)`)
           } catch (error) {
             state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
+            logEvent("transfer-fail", `receive: ${error instanceof Error ? error.message : String(error)}`)
           }
           render()
         }
@@ -922,6 +927,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     // (The transfer screen is mock-driven and would show "No transfer is active.")
     render()
     realSendInFlight = true
+    logEvent("transfer-start", `send ${fileList.length} file(s) to ${destination.name} (${destination.host}:${destination.port})`)
     try {
       await sendFiles({
         host: destination.host,
@@ -938,11 +944,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         },
       })
       state.status = `Sent ${fileList.length} file(s) to ${destination.name}`
+      logEvent("transfer-complete", `sent ${fileList.length} file(s) to ${destination.name}`)
       // Remove only the files that were sent; anything staged elsewhere
       // (other folders, re-staged mid-send) stays.
       for (const id of sentIds) state.staged.local.delete(id)
     } catch (error) {
       state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+      logEvent("transfer-fail", `send to ${destination.name}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       realSendInFlight = false
     }

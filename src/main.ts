@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { createSyncWeaveApp, type RealTransport } from "./app.js"
+import { logEvent } from "./services/diagnostic-log.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "./services/mock-transfer-service.js"
@@ -177,6 +178,7 @@ if (!realMode) {
   }
 
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
+  logEvent("session-start", `real mode alias=${alias} port=${tcpPort} bind=${bindAddr}`)
   const real: RealTransport = {
     identity,
     listener,
@@ -197,6 +199,7 @@ if (!realMode) {
     real,
   })
   const dispose = () => {
+    logEvent("session-stop")
     try {
       discovery.stop()
     } catch { /* best effort */ }
