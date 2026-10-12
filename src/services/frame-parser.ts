@@ -41,6 +41,7 @@ export const FrameType = {
   SessionOpen: 0x01,
   IdentityConfirm: 0x02,
   TransferRequest: 0x10,
+  TransferAccept: 0x11,
   FileHeader: 0x20,
   FileChunk: 0x21,
   FileEnd: 0x22,
@@ -66,6 +67,9 @@ export type ReceiverState =
   | "identity-confirmed"
   | "request-review"
   | "receiving"
+  | "awaiting-confirm"
+  | "awaiting-accept"
+  | "sending"
   | "closed"
 
 export interface ByteSource {
@@ -133,14 +137,20 @@ const allowedTypes: Record<Exclude<ReceiverState, "closed">, ReadonlySet<number>
     FrameType.Cancel,
     FrameType.Error,
   ]),
+  // Sender-side states: the sender parses the receiver's replies with the
+  // same header-first strictness.
+  "awaiting-confirm": new Set([FrameType.IdentityConfirm, FrameType.Cancel, FrameType.Error]),
+  "awaiting-accept": new Set([FrameType.TransferAccept, FrameType.Cancel, FrameType.Error]),
+  sending: new Set([FrameType.Cancel, FrameType.Error]),
 }
 
 /** Protected extension keys allowed per frame type. Unknown or disallowed
  *  keys are rejected as soon as the key byte is recognized. */
 const allowedExtensionKeys: Record<number, ReadonlySet<number>> = {
-  [FrameType.SessionOpen]: new Set([ExtensionKey.SessionId]),
+  [FrameType.SessionOpen]: new Set([ExtensionKey.SessionId, ExtensionKey.TranscriptConfirmation]),
   [FrameType.IdentityConfirm]: new Set([ExtensionKey.SessionId, ExtensionKey.TranscriptConfirmation]),
   [FrameType.TransferRequest]: new Set([ExtensionKey.SessionId, ExtensionKey.RequestId]),
+  [FrameType.TransferAccept]: new Set([ExtensionKey.SessionId, ExtensionKey.RequestId]),
   [FrameType.FileHeader]: new Set([ExtensionKey.SessionId, ExtensionKey.FileId, ExtensionKey.FileIndex]),
   [FrameType.FileChunk]: new Set([ExtensionKey.SessionId, ExtensionKey.FileId]),
   [FrameType.FileEnd]: new Set([ExtensionKey.SessionId, ExtensionKey.FileId]),
@@ -190,6 +200,9 @@ export class FrameParser {
       "identity-confirmed",
       "request-review",
       "receiving",
+      "awaiting-confirm",
+      "awaiting-accept",
+      "sending",
       "closed",
     ]
     if (order.indexOf(next) < order.indexOf(this.protocolState)) {
@@ -408,4 +421,48 @@ export class FrameParser {
     this.close(reason)
     return { kind: "rejected", reason }
   }
+}
+
+/**
+ * Encode one application frame: fixed 8-byte prefix, bounded extension
+ * section, then the body. Keys/values are validated against the same
+ * per-type allowlists and bounds the parser enforces, so an encoder-side
+ * violation is a programming error, not a wire event.
+ */
+export function encodeFrame(
+  type: FrameType,
+  body: Uint8Array,
+  extension: ReadonlyMap<number, Uint8Array> = new Map(),
+  maxBodyLength = 16 * 1024 * 1024,
+): Uint8Array {
+  if (!Object.values(FrameType).includes(type as FrameType)) {
+    throw new Error(`encodeFrame: unknown frame type 0x${type.toString(16)}`)
+  }
+  if (body.length > maxBodyLength) {
+    throw new Error(`encodeFrame: body length ${body.length} exceeds maximum ${maxBodyLength}`)
+  }
+  const allowed = allowedExtensionKeys[type] ?? new Set<number>()
+  if (extension.size > MAX_EXTENSION_ENTRIES) {
+    throw new Error("encodeFrame: too many extension entries")
+  }
+  const extBytes: number[] = [extension.size]
+  for (const [key, value] of extension) {
+    if (!allowed.has(key)) {
+      throw new Error(`encodeFrame: key 0x${key.toString(16)} not allowed for frame type 0x${type.toString(16)}`)
+    }
+    if (value.length > MAX_EXTENSION_VALUE_BYTES) {
+      throw new Error("encodeFrame: extension value too long")
+    }
+    extBytes.push(key, value.length, ...value)
+  }
+  const out = new Uint8Array(8 + extBytes.length + body.length)
+  out[0] = FRAME_MAGIC_0
+  out[1] = FRAME_MAGIC_1
+  out[2] = FRAME_VERSION
+  out[3] = type
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength)
+  view.setUint32(4, body.length)
+  out.set(extBytes, 8)
+  out.set(body, 8 + extBytes.length)
+  return out
 }

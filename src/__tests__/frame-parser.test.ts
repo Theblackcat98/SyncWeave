@@ -163,10 +163,10 @@ test("adversarial (c1): unknown protected key in session-open is rejected before
   expect(parser.counters.bodyBytesConsumed).toBe(0)
 })
 
-test("adversarial (c2): identity-confirmation fields piggybacked in session-open are rejected", async () => {
+test("adversarial (c2): transfer-request fields piggybacked in session-open are rejected", async () => {
   const bytes = encodeFrame(FrameType.SessionOpen, new Uint8Array(0), [
     [ExtensionKey.SessionId, sessionId],
-    [ExtensionKey.TranscriptConfirmation, new Uint8Array([1])], // not allowed on session-open
+    [ExtensionKey.RequestId, new Uint8Array([1])], // not allowed on session-open
   ])
   const { parser } = parserFor(bytes)
   expect((await parser.readHeader()).kind).toBe("rejected")
