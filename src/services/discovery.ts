@@ -254,6 +254,16 @@ export class DiscoveryService {
   }
 
   /**
+   * Seed a manually-entered peer (e.g. from --peer). Manual peers never
+   * expire and are marked with a `manual:` peerId prefix. Their Peer ID is
+   * unknown until a transfer verifies it (TOFU on send).
+   */
+  addManualPeer(peer: DiscoveredPeer): void {
+    this.peers.set(peer.peerId, peer)
+    this.events.onPeersChanged?.(this.listPeers())
+  }
+
+  /**
    * Process one received datagram. Public as a test seam; `start()` wires
    * it to the UDP socket's data handler.
    */
@@ -283,6 +293,8 @@ export class DiscoveryService {
   sweepExpired(now: number = Date.now()): void {
     let changed = false
     for (const [id, peer] of this.peers) {
+      // Manual peers never expire.
+      if (id.startsWith("manual:")) continue
       if (now - peer.lastSeen > PEER_EXPIRY_MS) {
         this.peers.delete(id)
         changed = true

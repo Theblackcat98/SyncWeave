@@ -3,10 +3,30 @@ import type { AppMode, AppState, ConsentRequest, MockPeer, Pane, Screen, Transfe
 import { OTHER_PANE } from "./domain.js"
 import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
 import { RealFileSystemService } from "./services/real-filesystem.js"
+import type { EphemeralIdentity } from "./services/peer-id.js"
+import { listenNoise } from "./services/transport.js"
+import { receiveFiles, sendFiles } from "./services/transfer-protocol.js"
+import type { DiscoveryService, DiscoveredPeer } from "./services/discovery.js"
+type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
 import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
 import { motion } from "./theme.js"
 import { AnimationClock } from "./ui/animation-clock.js"
 import { renderApp } from "./ui/render.js"
+
+/**
+ * Real-mode transport bundle. In real mode the app owns one ephemeral
+ * identity for the whole run (announced via discovery so peers can verify
+ * it), one TCP listener, and one discovery service.
+ */
+export interface RealTransport {
+  identity: EphemeralIdentity
+  listener: NoiseListener
+  discovery: DiscoveryService
+  alias: string
+  tcpPort: number
+  /** Directory where received files are written. */
+  receiveDirectory: string
+}
 
 export interface AppDependencies {
   filesystem: FileSystemService
@@ -20,6 +40,8 @@ export interface AppDependencies {
    * a receiver status panel — the receiver's files are never shown.
    */
   mode?: AppMode
+  /** Required in real mode: the live transport bundle. */
+  real?: RealTransport
 }
 
 export interface SyncWeaveApp {
@@ -36,7 +58,13 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   const filesystem: FileSystemService =
     mode === "real" ? new RealFileSystemService() : dependencies.filesystem
   const { peerService, transferService, receiveDestinations } = dependencies
-  const peers = peerService.discover()
+  // In real mode the peer list is populated from UDP-multicast discovery
+  // (plus manual entries); in mock mode it comes from the mock service.
+  let peers: MockPeer[] = mode === "real" ? [] : peerService.discover()
+  // Real-mode consent bridge resolver (set by setupRealMode, consumed by command()).
+  let realConsentResolver: ((files: Array<{ name: string; bytes: number; sha256: string }>) => void) | null = null
+  // sha256 lookup for the pending real consent (consent screen has no sha256 field).
+  let pendingSha256: Map<string, string> = new Map()
   const state = createInitialAppState(filesystem.paths, dependencies.reducedMotion)
   const clock = new AnimationClock()
   let paused = false
@@ -425,10 +453,45 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   }
 
   function command(name: string): void {
+    // Real-mode consent bridge: if a real incoming transfer is awaiting the
+    // user's accept/decline, those commands resolve the parked promise.
+    if (mode === "real" && realConsentResolver) {
+      if (name === "consent-accept" || name === "consent-all") {
+        const req = state.request
+        const accepted = (req?.files ?? [])
+          .filter((f) => f.accepted)
+          .map((f) => ({ name: f.name, bytes: f.bytes, sha256: pendingSha256.get(f.id) ?? "" }))
+          .filter((f) => f.sha256.length === 64)
+        const resolve = realConsentResolver
+        realConsentResolver = null
+        state.request = null
+        setScreen("workspace")
+        state.status = accepted.length > 0 ? `Accepted ${accepted.length} file(s) · receiving…` : "Declined incoming transfer"
+        render()
+        resolve(accepted)
+        return
+      }
+      if (name === "consent-decline") {
+        const resolve = realConsentResolver
+        realConsentResolver = null
+        state.request = null
+        setScreen("workspace")
+        state.status = "Declined incoming transfer"
+        render()
+        resolve([])
+        return
+      }
+    }
     switch (name) {
       case "workspace": state.request = state.screen === "transfer" ? state.request : null; setScreen("workspace"); return
       case "send-review": openSendReview(); return
-      case "send-to-consent": beginOutgoingConsent(); return
+      case "send-to-consent":
+        if (mode === "real" && dependencies.real) {
+          void beginRealSend(dependencies.real)
+          return
+        }
+        beginOutgoingConsent()
+        return
       case "incoming": createIncomingRequest(); return
       case "peer": state.identityStep = 0; setScreen("peer"); return
       case "favorites": openFavorites(); return
@@ -589,6 +652,135 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
   }
 
+  /**
+   * Real-mode wiring: live discovery peers, real send/receive. The mock
+   * simulation paths above are untouched; this only activates in real mode.
+   */
+  function setupRealMode(real: RealTransport): void {
+    // Map discovered peers onto the peer-list shape the UI already renders.
+    const syncPeers = () => {
+      const discovered: DiscoveredPeer[] = real.discovery.listPeers()
+      const mapped: MockPeer[] = discovered.map((d) => ({
+        id: d.peerId,
+        name: d.alias,
+        host: d.address,
+        port: d.tcpPort,
+        fingerprint: d.peerId,
+        online: true,
+      }))
+      // Keep manually added peers (id starts with "manual:").
+      const manual = peers.filter((p) => p.id.startsWith("manual:"))
+      peers = [...manual, ...mapped]
+      if (state.peerIndex >= peers.length) state.peerIndex = Math.max(0, peers.length - 1)
+    }
+    const peerTimer = setInterval(() => {
+      if (disposed) {
+        clearInterval(peerTimer)
+        return
+      }
+      const before = peers.length
+      syncPeers()
+      if (peers.length !== before) render()
+    }, 2000)
+    syncPeers()
+
+    // Consent bridge: receiveFiles' onTransferRequest needs user input from
+    // the TUI. We park the resolver (consumed by command() above), show the
+    // consent screen, and resolve it when the user accepts/declines there.
+    const pendingConsent = (request: { peerId: string; files: Array<{ name: string; bytes: number; sha256: string }> }) => {
+      return new Promise<Array<{ name: string; bytes: number; sha256: string }>>((resolve) => {
+        realConsentResolver = resolve
+        // Keep sha256 by file id: the consent screen shape has no sha256 field.
+        pendingSha256 = new Map(request.files.map((f) => [f.sha256, f.sha256]))
+        // Reuse the consent screen shape: files with accepted flags.
+        state.request = {
+          id: `incoming-${Date.now()}`,
+          mode: "incoming",
+          peer: peer() ?? { id: request.peerId, name: request.peerId.slice(0, 12), host: "", port: 0, fingerprint: request.peerId, online: true },
+          files: request.files.map((f) => ({ id: f.sha256, name: f.name, bytes: f.bytes, accepted: true, renamed: false })),
+          createdAt: Date.now(),
+        }
+        state.selectedConsentFile = 0
+        state.status = `Incoming transfer from ${request.peerId.slice(0, 12)}… · review and accept/decline`
+        setScreen("consent")
+      })
+    }
+
+    // Background receive loop: one session at a time (per the budget).
+    const receiveLoop = async () => {
+      for await (const hs of real.listener.accept()) {
+        if (disposed) break
+        try {
+          state.status = "Incoming connection · verifying identity…"
+          render()
+          const received = await receiveFiles({
+            channel: hs.channel,
+            handshakeHash: hs.handshakeHash,
+            // No out-of-band expected ID: the consent screen shows the
+            // verified Peer ID and the user's accept is the confirmation.
+            destinationDirectory: real.receiveDirectory,
+            identity: real.identity,
+            onTransferRequest: pendingConsent,
+            onProgress: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => {
+              state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
+              render()
+            },
+          })
+          state.status = `Received ${received.length} file(s) → ${real.receiveDirectory}`
+        } catch (error) {
+          state.status = `Receive failed: ${error instanceof Error ? error.message : String(error)}`
+        }
+        render()
+      }
+    }
+    void receiveLoop()
+    void peerTimer
+  }
+
+  /**
+   * Real-mode send: staged real files → selected discovered/manual peer →
+   * sendFiles with progress. Called from the send-review confirm action.
+   */
+  async function beginRealSend(real: RealTransport): Promise<void> {
+    const files = stagedEntries().filter((e) => e.kind === "file")
+    const destination = peer()
+    if (files.length === 0) {
+      state.status = "Stage at least one file first · Space selects"
+      render()
+      return
+    }
+    if (!destination) {
+      state.status = "Select a peer first · Tab to the receiver pane, ↑/↓ to choose"
+      render()
+      return
+    }
+    const fileList = files.map((f) => ({ path: f.id, name: f.name }))
+    state.status = `Connecting to ${destination.name} (${destination.host}:${destination.port})…`
+    setScreen("transfer")
+    try {
+      await sendFiles({
+        host: destination.host,
+        port: destination.port,
+        files: fileList,
+        // Discovered peers carry their verified Peer ID; manual peers use
+        // TOFU (their ID is unknown until the handshake verifies it).
+        expectedPeerId: destination.fingerprint.startsWith("manual:") ? undefined : destination.fingerprint,
+        identity: real.identity,
+        onProgress: (fileIndex, fileName, bytesSent, fileBytes) => {
+          const pct = Math.round((bytesSent / Math.max(1, fileBytes)) * 100)
+          state.status = `Sending ${fileName} (${fileIndex + 1}/${fileList.length}) · ${pct}%`
+          render()
+        },
+      })
+      state.status = `Sent ${fileList.length} file(s) to ${destination.name}`
+      // Clear staged after successful send.
+      state.staged.local.clear()
+    } catch (error) {
+      state.status = `Send failed: ${error instanceof Error ? error.message : String(error)}`
+    }
+    setScreen("workspace")
+  }
+
   function onBlur(): void {
     paused = true
     clock.pause()
@@ -605,6 +797,12 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   renderer.on(CliRenderEvents.RESIZE, render)
   renderer.on(CliRenderEvents.BLUR, onBlur)
   renderer.on(CliRenderEvents.FOCUS, onFocus)
+
+  // Real mode: wire live discovery, send, and receive. Mock mode keeps the
+  // deterministic simulation untouched.
+  if (mode === "real" && dependencies.real) {
+    setupRealMode(dependencies.real)
+  }
   render()
 
   function dispose(): void {
