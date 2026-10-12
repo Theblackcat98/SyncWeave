@@ -1,5 +1,8 @@
 export type SyncState = "synced" | "added" | "modified" | "deleted"
 export type Pane = "local" | "remote"
+/** "mock" renders the deterministic simulation; "real" renders the local
+ *  filesystem and a receiver status panel instead of the receiver's files. */
+export type AppMode = "mock" | "real"
 export type Screen = "workspace" | "send-review" | "consent" | "transfer" | "peer" | "favorites" | "diff" | "help" | "queue"
 export type TransferStatus = "queued" | "transferring" | "complete" | "declined" | "cancelled" | "failed"
 export type EntryKind = "file" | "directory"
