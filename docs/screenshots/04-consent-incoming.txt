@@ -1,0 +1,36 @@
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ * SyncWeave 0.1.0  TUI FILE TRANSFER  . MOCK DISCOVERY | 2 mock peers  -> MacBook-M3  | SIMULATION                 │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+ ┌─ O Incoming transfer request ──────────────────────────────────────────────────────────────────────────────────────┐ 
+ │                                                                                                                    │ 
+ │  Sender: Pixel-8  |  192.168.1.57:53317                                                                            │ 
+ │  3 proposed  |  3 selected  |  189 KB                                                                              │ 
+ │  Destination: ~/Downloads/SyncWeave  (1/3)  [D] cycle | [+] add | [-] remove                                       │ 
+ │  Review every item. Nothing streams until you accept this transfer.                                                │ 
+ │  Incoming request simulated | review the sender, files and destination                                             │ 
+ │                                                                                                                    │ 
+ │   [x] phase-notes.md  7 KB                                                                                         │ 
+ │   [x] terminal-preview.png  180 KB                                                                                 │ 
+ │   [x] syncweave-demo.json  2 KB                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │   Skip file | Space    Destination | D                                                                             │ 
+ │  Per-transfer choice only | Favorites and manual fingerprint comparison do not grant consent.                      │ 
+ │                                                                                                                    │ 
+ │   Accept all | A    Accept selected | Enter    Decline | X                                                         │ 
+ │                                                                                                                    │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+                                                                                                                        
+ ^v Focus  |  Space Include/skip  |  r Rename  |  d Destination  |  a Accept all  |  Enter Accept selected  |  x D...   
+                                                                                                                        

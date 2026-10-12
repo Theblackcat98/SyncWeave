@@ -1,13 +1,56 @@
 # SyncWeave
 
-A keyboard-first terminal UI for staging and sending files on a local network: a TUI take on LocalSend.
+**Send files to the computer next to you — no cloud, no accounts, no setup.** SyncWeave is a keyboard-first terminal app for moving files across your local network, in the spirit of LocalSend. Pick files, pick a peer, compare a short security code, and the bytes flow directly between machines over Noise-encrypted TCP.
 
-SyncWeave runs in two modes:
+![SyncWeave workspace — browse, stage, and send](docs/screenshots/01-workspace.png)
 
-- **Mock** (default): the original deterministic simulation. No real files are read or sent and no network is used.
-- **Real** (`--real`): sends files between SyncWeave instances over TCP, encrypted with `Noise_XX_25519_AESGCM_SHA256`. Peers are found by UDP multicast or added by hand with `--peer host:port`.
+## How it works
 
-Design and wire protocol: [docs/networking.md](docs/networking.md) and [docs/decisions.md](docs/decisions.md). Threat model and reporting: [SECURITY.md](SECURITY.md). Privacy: [docs/privacy.md](docs/privacy.md).
+1. **Browse** your files in a two-pane view. `Space` stages what you want to send.
+2. **Pick a peer** — discovered automatically on the LAN, or added by hand.
+3. **Compare the security code** shown on both screens, out loud or in person.
+4. **Send.** The receiver approves each transfer on a consent screen first.
+
+Nothing ever leaves your network. There are no servers, no accounts, and no telemetry.
+
+## Screenshots
+
+### Workspace — stage files, choose a peer
+
+The local pane shows your files; the remote pane shows the selected peer. Staged files are highlighted and tallied at the bottom.
+
+![Workspace with staged files](docs/screenshots/02-workspace-staged.png)
+
+### Send review — confirm before anything moves
+
+Review exactly what will go out and to whom. In real mode this is also where both sides compare the security code before any file names cross the wire.
+
+![Send review](docs/screenshots/03-send-review.png)
+
+### Consent — nothing arrives uninvited
+
+Every incoming transfer waits for your explicit approval. You see the sender, the file list, the destination, and the security code — accept all, accept a subset, or decline. You have 60 seconds to decide.
+
+![Incoming consent screen](docs/screenshots/04-consent-incoming.png)
+
+### Transfer — per-file acknowledgement
+
+The sender only reports success when the receiver acknowledges each file with a matching hash and size. Name collisions never overwrite: the second copy becomes `name (1).ext`.
+
+![Transfer progress](docs/screenshots/07-transfer.png)
+
+### Help — every key, one screen away
+
+Press `?` anywhere.
+
+![Help screen](docs/screenshots/05-help.png)
+
+> Screenshots were captured from the app's own test renderer in mock mode (`SYNCWEAVE_ASCII=1`). The layout is identical in real mode; only the data is simulated.
+
+## Modes
+
+- **Mock** (default): a deterministic simulation for exploring the UI. No files are read, nothing touches the network.
+- **Real** (`--real`): actual file transfers between SyncWeave instances over TCP, encrypted with `Noise_XX_25519_AESGCM_SHA256`. Peers are found by UDP multicast, or added manually with `--peer host:port`.
 
 ## Status
 

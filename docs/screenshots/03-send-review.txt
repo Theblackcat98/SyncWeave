@@ -1,0 +1,36 @@
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ * SyncWeave 0.1.0  TUI FILE TRANSFER  . MOCK DISCOVERY | 2 mock peers  -> MacBook-M3  | SIMULATION                 │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+ ┌─ O Review outgoing files ──────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │                                                                                                                    │ 
+ │  Local -> MacBook-M3                                                                                               │ 
+ │  Mock preview only | no files or network requests are sent.                                                        │ 
+ │  2 staged  |  14 KB                                                                                                │ 
+ │  Staged daily-todo.txt                                                                                             │ 
+ │    [x] architecture-diagram.md  12 KB                                                                              │ 
+ │    [x] daily-todo.txt  2 KB                                                                                        │ 
+ │  Next: preview a receiver-hosted request. Accepted files alone advance to mock progress.                           │ 
+ │                                                                                                                    │ 
+ │   Ask receiver | Enter    Back | Esc    Choose peer | Q                                                            │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+                                                                                                                        
+ Enter Continue to consent  |  q Choose peer  |  Esc Back                                                               
+                                                                                                                        
