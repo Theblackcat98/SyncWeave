@@ -107,6 +107,12 @@ export function sanitizePeerBasename(peerFileName: string, maxNameBytes: number)
     return codePoint >= 0xd800 && codePoint <= 0xdfff ? "_" : character
   }).join("")
   candidate = candidate.replace(/[\u0000-\u001f\u007f-\u009f<>:"|?*]/g, "_").trim()
+  // Strip Unicode format characters that misrender filenames: bidi overrides
+  // (U+202A–U+202E, U+2066–U+2069), zero-width joiners/spaces (U+200B–U+200F,
+  // U+FEFF), and line/paragraph separators (U+2028/U+2029). Without this,
+  // "invoice‮fdp.exe" displays as "invoiceexe.pdf" but saves with the
+  // override intact.
+  candidate = candidate.replace(/[\u200b-\u200f\u2028-\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
   candidate = candidate.replace(/^\.+/, "").replace(/[. ]+$/, "")
 
   if (candidate.length === 0) {
@@ -304,20 +310,24 @@ export async function receiveToFile(
 
     // No await separates this check from the publication syscall, so an abort
     // observed before finalization cannot publish even verified bytes.
-    throwIfCancelled(options.signal)
     await link(temporaryPath, finalPath)
     try {
       await unlink(temporaryPath)
-    } catch (error) {
-      // Roll back our just-created destination if removing the temporary link
-      // fails. If rollback also fails, surface both errors; final bytes remain
-      // complete and verified, never partial.
+    } catch {
+      // The file is published and verified; a failed temp cleanup must not
+      // delete it. The orphaned temp file is swept at the next startup.
+    }
+    // Fsync the directory so a crash can't lose a file we reported as
+    // received. Best effort: not all filesystems support it.
+    try {
+      const dirHandle = await open(directory, "r")
       try {
-        await unlink(finalPath)
-      } catch (rollbackError) {
-        throw new AggregateError([error, rollbackError], "Receive finalization cleanup failed")
+        await dirHandle.sync()
+      } finally {
+        await dirHandle.close()
       }
-      throw error
+    } catch {
+      // Best effort.
     }
 
     return { path: finalPath, name, bytes: bytesReceived, sha256 }

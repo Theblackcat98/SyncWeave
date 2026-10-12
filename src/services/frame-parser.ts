@@ -32,7 +32,11 @@
  */
 export const FRAME_MAGIC_0 = 0x53 // "S"
 export const FRAME_MAGIC_1 = 0x57 // "W"
-export const FRAME_VERSION = 0x01
+/**
+ * Protocol version 2 (coordinated bump). v1 frames are rejected: the version
+ * byte must equal FRAME_VERSION. See docs/networking.md "Protocol v2".
+ */
+export const FRAME_VERSION = 0x02
 export const FIXED_PREFIX_BYTES = 8
 export const MAX_EXTENSION_ENTRIES = 16
 export const MAX_EXTENSION_VALUE_BYTES = 64
@@ -42,9 +46,15 @@ export const FrameType = {
   IdentityConfirm: 0x02,
   TransferRequest: 0x10,
   TransferAccept: 0x11,
+  /** v2: explicit receiver decline (P1-9). */
+  Decline: 0x12,
   FileHeader: 0x20,
   FileChunk: 0x21,
   FileEnd: 0x22,
+  /** v2: per-file receiver acknowledgement (P0-2). */
+  FileResult: 0x23,
+  /** v2: final session outcome (P0-2). */
+  SessionResult: 0x24,
   Cancel: 0x30,
   Error: 0x31,
 } as const
@@ -58,6 +68,8 @@ export const ExtensionKey = {
   RequestId: 0x03,
   FileId: 0x04,
   FileIndex: 0x05,
+  /** v2: receiver-issued transfer token binding the file stream to Gate C. */
+  TransferToken: 0x06,
 } as const
 export type ExtensionKey = (typeof ExtensionKey)[keyof typeof ExtensionKey]
 
@@ -96,6 +108,12 @@ export interface FrameParserOptions {
   /** Maximum accepted declared body length (bytes). Larger declarations are
    *  rejected on the header, before any body read. Required, no default. */
   maxBodyLength: number
+  /**
+   * v2: tighter per-frame-type body caps (P0-6). A declared length above the
+   * cap for its type is rejected on the header, before any body byte is
+   * read or allocated. Types without an entry fall back to maxBodyLength.
+   */
+  maxBodyLengthByType?: Partial<Record<number, number>>
   /** Maximum accepted extension section bytes (default 512). */
   maxExtensionBytes?: number
   /** Header read timeout in ms (default 15_000). */
@@ -143,8 +161,18 @@ const allowedTypes: Record<Exclude<ReceiverState, "closed">, ReadonlySet<number>
   // Sender-side states: the sender parses the receiver's replies with the
   // same header-first strictness.
   "awaiting-confirm": new Set([FrameType.IdentityConfirm, FrameType.Cancel, FrameType.Error]),
-  "awaiting-accept": new Set([FrameType.TransferAccept, FrameType.Cancel, FrameType.Error]),
-  sending: new Set([FrameType.Cancel, FrameType.Error]),
+  "awaiting-accept": new Set([
+    FrameType.TransferAccept,
+    FrameType.Decline,
+    FrameType.Cancel,
+    FrameType.Error,
+  ]),
+  sending: new Set([
+    FrameType.FileResult,
+    FrameType.SessionResult,
+    FrameType.Cancel,
+    FrameType.Error,
+  ]),
 }
 
 /** Protected extension keys allowed per frame type. Unknown or disallowed
@@ -154,9 +182,17 @@ const allowedExtensionKeys: Record<number, ReadonlySet<number>> = {
   [FrameType.IdentityConfirm]: new Set([ExtensionKey.SessionId, ExtensionKey.TranscriptConfirmation]),
   [FrameType.TransferRequest]: new Set([ExtensionKey.SessionId, ExtensionKey.RequestId]),
   [FrameType.TransferAccept]: new Set([ExtensionKey.SessionId, ExtensionKey.RequestId]),
-  [FrameType.FileHeader]: new Set([ExtensionKey.SessionId, ExtensionKey.FileId, ExtensionKey.FileIndex]),
+  [FrameType.Decline]: new Set([ExtensionKey.SessionId]),
+  [FrameType.FileHeader]: new Set([
+    ExtensionKey.SessionId,
+    ExtensionKey.FileId,
+    ExtensionKey.FileIndex,
+    ExtensionKey.TransferToken,
+  ]),
   [FrameType.FileChunk]: new Set([ExtensionKey.SessionId, ExtensionKey.FileId]),
   [FrameType.FileEnd]: new Set([ExtensionKey.SessionId, ExtensionKey.FileId]),
+  [FrameType.FileResult]: new Set([ExtensionKey.SessionId]),
+  [FrameType.SessionResult]: new Set([ExtensionKey.SessionId]),
   [FrameType.Cancel]: new Set([ExtensionKey.SessionId]),
   [FrameType.Error]: new Set([ExtensionKey.SessionId]),
 }
@@ -271,6 +307,12 @@ export class FrameParser {
     if (bodyLength > this.options.maxBodyLength) {
       return this.reject(
         `declared body length ${bodyLength} exceeds maximum ${this.options.maxBodyLength}`,
+      )
+    }
+    const typeCap = this.options.maxBodyLengthByType?.[type]
+    if (typeCap !== undefined && bodyLength > typeCap) {
+      return this.reject(
+        `declared body length ${bodyLength} exceeds the 0x${type.toString(16)} cap of ${typeCap}`,
       )
     }
     if (!allowedTypes[this.protocolState].has(type)) {
@@ -409,15 +451,23 @@ export class FrameParser {
     let offset = 0
     // Bound the whole body read: a sender dribbling bytes forever must not
     // hang the receiver. (Header reads already have their own timeout.)
-    const bodyTimeout = AbortSignal.timeout(this.options.bodyTimeoutMs ?? 60_000)
-    const bodySignal = signal ? AbortSignal.any([signal, bodyTimeout]) : bodyTimeout
-    while (offset < header.bodyLength) {
-      const chunk = await this.source.read(header.bodyLength - offset, bodySignal)
-      if (chunk === null || chunk.length === 0) {
-        throw new FrameRejectedError("truncated frame body", this.protocolState)
+    // The reason propagates so the user sees *what* timed out.
+    const bodyBudget = new AbortController()
+    const bodyTimer = setTimeout(() => {
+      bodyBudget.abort(new Error(`frame body timed out after ${(this.options.bodyTimeoutMs ?? 60_000) / 1000}s: sender stalled mid-frame`))
+    }, this.options.bodyTimeoutMs ?? 60_000)
+    const bodySignal = signal ? AbortSignal.any([signal, bodyBudget.signal]) : bodyBudget.signal
+    try {
+      while (offset < header.bodyLength) {
+        const chunk = await this.source.read(header.bodyLength - offset, bodySignal)
+        if (chunk === null || chunk.length === 0) {
+          throw new FrameRejectedError("truncated frame body", this.protocolState)
+        }
+        out.set(chunk.subarray(0, header.bodyLength - offset), offset)
+        offset += Math.min(chunk.length, header.bodyLength - offset)
       }
-      out.set(chunk.subarray(0, header.bodyLength - offset), offset)
-      offset += Math.min(chunk.length, header.bodyLength - offset)
+    } finally {
+      clearTimeout(bodyTimer)
     }
     this.counters.bodyBytesConsumed += header.bodyLength
     return out

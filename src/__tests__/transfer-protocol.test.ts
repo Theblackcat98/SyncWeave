@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -83,7 +83,7 @@ test("loopback: two files transfer end-to-end with verified bytes and hashes", a
       })
     })()
 
-    await sendFiles({
+    const sendResult = await sendFiles({
       host: "127.0.0.1",
       port: h.port,
       files: [
@@ -93,8 +93,21 @@ test("loopback: two files transfer end-to-end with verified bytes and hashes", a
       expectedPeerId: receiverIdentity.peerId,
       identity: senderIdentity,
     })
-
-    const received = await receiverDone
+    // P0-2: success is reported only on receiver acknowledgement.
+    expect(sendResult.outcomes).toHaveLength(2)
+    for (const o of sendResult.outcomes) {
+      expect(o.ok).toBe(true)
+      expect(o.errorCode).toBeUndefined()
+    }
+    expect(sendResult.outcomes[0]!.name).toBe("hello.txt")
+    expect(sendResult.verifiedPeerId).toBe(receiverIdentity.peerId)
+    expect(sendResult.sas).toMatch(/^\d{4}-\d{4}-\d{4}$/)
+    // Both ends derive the same SAS from the handshake hash.
+    const receiverResult = await receiverDone
+    expect(receiverResult.sas).toBe(sendResult.sas)
+    expect(receiverResult.verifiedPeerId).toBe(senderIdentity.peerId)
+    expect(receiverResult.sas).toMatch(/^\d{4}-\d{4}-\d{4}$/)
+    const received = receiverResult.files
     expect(received).toHaveLength(2)
     for (const [original, got] of [
       [p1, received[0]!],
@@ -142,7 +155,8 @@ test("loopback: filename collision auto-renames instead of overwriting", async (
       identity: senderIdentity,
     })
 
-    const received = await receiverDone
+    const result = await receiverDone
+    const received = result.files
     expect(received).toHaveLength(1)
     expect(received[0]!.name).toBe("report (1).txt")
     // The pre-existing file is untouched.
@@ -187,7 +201,7 @@ test("loopback: subset acceptance transfers only the accepted file", async () =>
       identity: senderIdentity,
     })
 
-    const received = await receiverDone
+    const received = (await receiverDone).files
     expect(received).toHaveLength(1)
     expect(received[0]!.name).toBe("keep.txt")
   } finally {
@@ -245,7 +259,7 @@ test("loopback: wrong expected Peer ID aborts before any file metadata flows", a
   }
 }, 30_000)
 
-test("loopback: receiver decline sends no bytes and fails the sender", async () => {
+test("loopback: receiver decline sends an explicit DECLINE frame, no file bytes", async () => {
   const h = await startHarness()
   try {
     const p1 = await writeTestFile(h.senderDir, "nope.txt", 100)
@@ -263,7 +277,9 @@ test("loopback: receiver decline sends no bytes and fails the sender", async () 
           destinationDirectory: h.destDir,
           onTransferRequest: async () => [],
         }),
-      ).rejects.toThrow()
+        // P1-9: the receiver reports "declined", and the sender sees an
+        // explicit DECLINE frame — not a bare close or exception text.
+      ).rejects.toThrow(/declined by user/)
     })()
 
     await expect(
@@ -274,8 +290,10 @@ test("loopback: receiver decline sends no bytes and fails the sender", async () 
         expectedPeerId: receiverIdentity.peerId,
         identity: senderIdentity,
       }),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/declined by receiver/)
     await receiverDone
+    // Nothing was written to the destination.
+    expect(await readdir(h.destDir)).toHaveLength(0)
   } finally {
     await h.closeListener()
     await rm(h.senderDir, { recursive: true, force: true })
@@ -304,6 +322,14 @@ import {
   enforceBudgets,
   validateProtocolFiles,
   validateIdentityProofBody,
+  validateTransferAcceptBody,
+  validateFileResultBody,
+  validateSessionResultBody,
+  validateSignalBody,
+  sasFromHandshakeHash,
+  sessionIdFromHandshakeHash,
+  signProof,
+  verifyProof,
   BUDGET_MAX_FILES,
 } from "../services/transfer-protocol.js"
 
@@ -339,11 +365,138 @@ test("validation: malformed protocol JSON fails closed", () => {
   expect(() => validateProtocolFiles([{ ...goodFile(), name: "" }], "t")).toThrow(/bad file name/)
   expect(() => validateProtocolFiles([{ ...goodFile(), sha256: "zzz" }], "t")).toThrow(/bad sha256/)
   expect(() => validateProtocolFiles([{ ...goodFile(), sha256: "A".repeat(64) }], "t")).toThrow(/bad sha256/)
-  expect(() => validateIdentityProofBody({})).toThrow(/bad peerId/)
+  expect(() => validateIdentityProofBody({})).toThrow(/bad version/)
   expect(() =>
-    validateIdentityProofBody({ peerId: "x", identityPublicKey: "y" }),
+    validateIdentityProofBody({ v: 2, role: "sender", peerId: "x", identityPublicKey: "y" }),
   ).toThrow(/bad identitySignature/)
   expect(() =>
-    validateIdentityProofBody({ peerId: "x", identityPublicKey: "y", identitySignature: "z" }),
+    validateIdentityProofBody({ v: 2, role: "sender", peerId: "x", identityPublicKey: "y", identitySignature: "z" }),
   ).not.toThrow()
+})
+
+test("v2: SAS is deterministic and formatted as three digit groups", () => {
+  const h1 = new Uint8Array(32).fill(7)
+  const h2 = new Uint8Array(32).fill(8)
+  expect(sasFromHandshakeHash(h1)).toMatch(/^\d{4}-\d{4}-\d{4}$/)
+  expect(sasFromHandshakeHash(h1)).toBe(sasFromHandshakeHash(h1))
+  expect(sasFromHandshakeHash(h1)).not.toBe(sasFromHandshakeHash(h2))
+})
+
+test("v2: session id is 16 bytes, deterministic per transcript", () => {
+  const h1 = new Uint8Array(32).fill(7)
+  const h2 = new Uint8Array(32).fill(8)
+  const id1 = sessionIdFromHandshakeHash(h1)
+  expect(id1).toHaveLength(16)
+  expect(Buffer.from(id1).equals(Buffer.from(sessionIdFromHandshakeHash(h1)))).toBe(true)
+  expect(Buffer.from(id1).equals(Buffer.from(sessionIdFromHandshakeHash(h2)))).toBe(false)
+})
+
+test("v2: identity proof is role-bound and rejects self/reflection", () => {
+  const hash = new Uint8Array(32).fill(9)
+  const alice = generateEphemeralIdentity()
+  const bob = generateEphemeralIdentity()
+
+  const proof = signProof(alice, hash, "sender")
+  expect(proof.v).toBe(2)
+  expect(proof.role).toBe("sender")
+  // Correct role verifies.
+  expect(verifyProof(proof, hash, undefined, { expectedRole: "sender", ownPeerId: bob.peerId })).toBe(
+    alice.peerId,
+  )
+  // Wrong expected role fails: the signature binds the role.
+  expect(() =>
+    verifyProof(proof, hash, undefined, { expectedRole: "receiver", ownPeerId: bob.peerId }),
+  ).toThrow(/role/)
+  // A proof of our OWN identity is rejected (reflection / self-connect).
+  expect(() =>
+    verifyProof(proof, hash, undefined, { expectedRole: "sender", ownPeerId: alice.peerId }),
+  ).toThrow(/own identity/)
+  // A proof signed for a different session hash fails.
+  const otherHash = new Uint8Array(32).fill(10)
+  expect(() =>
+    verifyProof(proof, otherHash, undefined, { expectedRole: "sender", ownPeerId: bob.peerId }),
+  ).toThrow(/signature/)
+  // Tampering with the claimed role invalidates the signature.
+  const tampered = { ...proof, role: "receiver" as const }
+  expect(() =>
+    verifyProof(tampered, hash, undefined, { expectedRole: "receiver", ownPeerId: bob.peerId }),
+  ).toThrow()
+})
+
+test("v2: identity reuse across sessions is forbidden (P1-13)", async () => {
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "a.txt", 10)
+    const id = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+    const receiverDone = (async () => {
+      const hs = await h.nextChannel()
+      return receiveFiles({
+        channel: hs.channel,
+        handshakeHash: hs.handshakeHash,
+        expectedPeerId: id.peerId,
+        identity: receiverIdentity,
+        destinationDirectory: h.destDir,
+        onTransferRequest: async (req) => req.files,
+      })
+    })()
+    await sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "a.txt" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: id,
+    })
+    await receiverDone
+    // Second session with the same identity must fail closed.
+    await expect(
+      sendFiles({
+        host: "127.0.0.1",
+        port: h.port,
+        files: [{ path: p1, name: "a.txt" }],
+        expectedPeerId: receiverIdentity.peerId,
+        identity: id,
+      }),
+    ).rejects.toThrow(/reuse/)
+  } finally {
+    await h.closeListener()
+    await rm(h.senderDir, { recursive: true, force: true })
+    await rm(h.destDir, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test("v2: wire body validators fail closed", () => {
+  const token = Buffer.from(new Uint8Array(16)).toString("base64")
+  expect(() => validateTransferAcceptBody({ acceptedIndices: [0, 2], transferToken: token })).not.toThrow()
+  expect(() => validateTransferAcceptBody({ acceptedIndices: [-1], transferToken: token })).toThrow()
+  expect(() => validateTransferAcceptBody({ acceptedIndices: [1.5], transferToken: token })).toThrow()
+  expect(() => validateTransferAcceptBody({ acceptedIndices: [0] })).toThrow()
+
+  expect(() =>
+    validateFileResultBody({ index: 0, ok: true, finalName: "a.txt", bytes: 10, sha256: "a".repeat(64) }),
+  ).not.toThrow()
+  expect(() => validateFileResultBody({ index: 0, ok: false, errorCode: "E_NOSPC" })).not.toThrow()
+  expect(() => validateFileResultBody({ index: 0, ok: false })).toThrow(/errorCode/)
+  expect(() => validateFileResultBody({ index: 0, ok: true, finalName: "a.txt", bytes: 10 })).toThrow()
+
+  expect(() => validateSessionResultBody({ ok: true })).not.toThrow()
+  expect(() => validateSessionResultBody({ ok: false, error: "boom" })).not.toThrow()
+  expect(() => validateSessionResultBody({ ok: "yes" })).toThrow()
+
+  expect(() => validateSignalBody({ code: "local-cancel", reason: "user" }, "cancel")).not.toThrow()
+  expect(() => validateSignalBody({ code: "", reason: "x" }, "cancel")).toThrow(/code/)
+  expect(() => validateSignalBody({ code: "c" }, "cancel")).toThrow(/reason/)
+})
+
+test("v2: identity proof body must be v2 with a valid role", () => {
+  const good = {
+    v: 2,
+    role: "sender",
+    peerId: "x",
+    identityPublicKey: "y",
+    identitySignature: "z",
+  }
+  expect(() => validateIdentityProofBody(good)).not.toThrow()
+  expect(() => validateIdentityProofBody({ ...good, v: 1 })).toThrow(/version/)
+  expect(() => validateIdentityProofBody({ ...good, role: "mallory" })).toThrow(/role/)
 })

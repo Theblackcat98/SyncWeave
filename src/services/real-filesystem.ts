@@ -30,8 +30,20 @@ export function expandHome(path: string): string {
  */
 export class RealFileSystemService implements FileSystemService {
   readonly paths: Record<Pane, string>
+  /** Total entries in the last list() call (before the 500-entry cap). */
+  lastListTotal = 0
+  /** Error from the last list() call, if the directory could not be read. */
+  lastListError: string | null = null
 
-  constructor(rootDirectory: string = process.cwd()) {
+  listTotal(): number | undefined {
+    return this.lastListTotal
+  }
+
+  listError(): string | null {
+    return this.lastListError
+  }
+
+  constructor(rootDirectory: string = homedir()) {
     this.paths = { local: expandHome(rootDirectory), remote: "" }
   }
 
@@ -41,21 +53,39 @@ export class RealFileSystemService implements FileSystemService {
     let names: string[]
     try {
       names = readdirSync(directory)
-    } catch {
+      this.lastListError = null
+    } catch (error) {
+      this.lastListError = error instanceof Error ? error.message : String(error)
+      this.lastListTotal = 0
       return []
     }
+    // Hide our own staging temp files: they must never be listed or sent.
+    const visible = names.filter((n) => !n.startsWith(".syncweave-")).sort()
+    this.lastListTotal = visible.length
     const entries: MockEntry[] = []
-    for (const name of names.sort()) {
+    for (const name of visible) {
       if (entries.length >= MAX_DIRECTORY_ENTRIES) break
       const absolute = join(directory, name)
       let isDirectory = false
-      let isLink = false
+      let unsupported: string | undefined
       let bytes = 0
       try {
         const stat = lstatSync(absolute)
-        isLink = stat.isSymbolicLink()
-        isDirectory = stat.isDirectory() && !isLink
-        bytes = isLink || stat.isDirectory() ? 0 : stat.size
+        if (stat.isSymbolicLink()) {
+          // Never follow symlinks; never send them (target could be
+          // /dev/zero, a FIFO, or outside the shared tree).
+          unsupported = "symlink"
+        } else if (stat.isDirectory()) {
+          isDirectory = true
+        } else if (stat.isFile()) {
+          bytes = stat.size
+        } else if (stat.isFIFO()) {
+          unsupported = "FIFO"
+        } else if (stat.isSocket()) {
+          unsupported = "socket"
+        } else {
+          unsupported = "special file"
+        }
       } catch {
         continue
       }
@@ -65,6 +95,7 @@ export class RealFileSystemService implements FileSystemService {
         kind: isDirectory ? "directory" : "file",
         bytes,
         state: "synced",
+        ...(unsupported ? { unsupported } : {}),
       })
     }
     return entries

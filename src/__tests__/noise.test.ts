@@ -156,3 +156,50 @@ test("remote static key is exposed after the peer's s token", () => {
   expect(init.remoteStatic).not.toBeNull()
   expect(init.remoteStatic!.length).toBe(32)
 })
+
+test("v2: handshake messages with impossible lengths are rejected pre-auth", async () => {
+  const { MAX_NOISE_MESSAGE_BYTES } = await import("../services/noise.js")
+  const a = new NoiseHandshake({ initiator: true })
+  const b = new NoiseHandshake({ initiator: false })
+  // Responder's first read (-> e) needs at least 32 bytes.
+  expect(() => b.readMessage(new Uint8Array(10))).toThrow(/too short/)
+  const m1 = a.writeMessage(new Uint8Array(0))
+  expect(m1).toHaveLength(32)
+  // Initiator's read (<- e, ee, s, es) needs at least 80 bytes.
+  expect(() => a.readMessage(new Uint8Array(40))).toThrow(/too short/)
+  // Oversized messages are rejected before any decryption work.
+  expect(() => b.readMessage(new Uint8Array(MAX_NOISE_MESSAGE_BYTES + 1))).toThrow(/exceeds/)
+})
+
+test("v2: transport plaintext/ciphertext bounded by the Noise message limit", async () => {
+  const { MAX_NOISE_MESSAGE_BYTES, MAX_NOISE_PLAINTEXT_BYTES } = await import(
+    "../services/noise.js"
+  )
+  const empty = new Uint8Array(0)
+  const a = new NoiseHandshake({ initiator: true })
+  const b = new NoiseHandshake({ initiator: false })
+  const m1 = a.writeMessage(empty)
+  const m2 = b.readMessage(m1)
+  void m2
+  const m2out = b.writeMessage(empty)
+  const m3in = a.readMessage(m2out)
+  void m3in
+  const m3 = a.writeMessage(empty)
+  b.readMessage(m3)
+  const ac = a.split()
+  const bc = b.split()
+  const ad = new Uint8Array(0)
+  // A full-size round trip works (do this first: each encrypt consumes a nonce).
+  const ct = ac.send.encryptWithAd(ad, new Uint8Array(MAX_NOISE_PLAINTEXT_BYTES))
+  expect(ct).toHaveLength(MAX_NOISE_MESSAGE_BYTES)
+  const pt = bc.receive.decryptWithAd(ad, ct)
+  expect(pt).toHaveLength(MAX_NOISE_PLAINTEXT_BYTES)
+  // One byte over the plaintext limit throws instead of emitting.
+  expect(() =>
+    ac.send.encryptWithAd(ad, new Uint8Array(MAX_NOISE_PLAINTEXT_BYTES + 1)),
+  ).toThrow(/exceeds/)
+  // Ciphertext over 65535 bytes is rejected before decryption.
+  expect(() =>
+    bc.receive.decryptWithAd(ad, new Uint8Array(MAX_NOISE_MESSAGE_BYTES + 1)),
+  ).toThrow(/exceeds/)
+})

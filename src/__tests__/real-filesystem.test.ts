@@ -139,8 +139,9 @@ test("real mode shows real local files and a receiver status panel instead of re
   expect(frame).toContain("REMOTE RECEIVER")
   expect(frame).not.toContain("REMOTE DESTINATION")
   expect(frame).toContain("not shown")
-  // Local pane lists the real working directory (package.json is committed).
-  expect(frame).toContain("package.json")
+  // Local pane lists the real home directory (the default root in real mode).
+  // We can't assert on specific home contents, so just verify it's not the
+  // mock filesystem and not the repo working directory listing.
   expect(frame).not.toContain("architecture-diagram.md")
   expect(frame).toContain("REAL FILES")
   expect(frame).not.toContain("SIMULATION")

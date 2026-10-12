@@ -6,8 +6,9 @@ import { createHash, getRandomValues, timingSafeEqual } from "node:crypto"
  * "Protocol-agnostic session authorization gates").
  *
  * Model:
- * - Every session gets a fresh unpredictable 128-bit session id and nonce.
- *   Identity keys/ids are created per session by the transport layer; this
+ * - Every session gets a fresh unpredictable 128-bit session id and nonce,
+ *   or a transcript-derived id both endpoints agree on (P1-12).
+ *   Identity keys/ids are created per session by the caller; this
  *   module binds authorizations to the *presented* peer identity bytes without
  *   persisting them.
  * - Gate B (two independent out-of-band identity confirmations) is recorded
@@ -42,6 +43,18 @@ export interface SessionDescriptor {
   /** Monotonic creation time (ms). */
   readonly createdAt: number
 }
+
+/**
+ * Gate state machine (P1-14). Transitions are forward-only and fed
+ * exclusively by the proof path (`recordIdentityConfirmation`) and the
+ * user's own actions (`authorizeTransfer`, `acceptTransfer`):
+ *
+ *   created -> identity-confirmed -> transfer-authorized -> accepted
+ *
+ * `destroySession` moves to "destroyed" from any state. There is no
+ * transition back, and no public API that skips a state.
+ */
+export type GateState = "created" | "identity-confirmed" | "transfer-authorized" | "accepted" | "destroyed"
 
 export interface AuthorizedFile {
   readonly name: string
@@ -86,6 +99,7 @@ interface SessionRecord {
   confirmations: Set<"local" | "remote">
   usedTokens: Set<string>
   destroyed: boolean
+  gateState: GateState
 }
 
 function randomBytes(n: number): Uint8Array {
@@ -132,23 +146,55 @@ export class SessionManager {
     this.now = options.now ?? Date.now
   }
 
-  /** Create a fresh ephemeral session. Identity keys/ids are created per
-   *  session by the transport layer and never loaded from durable storage. */
-  createSession(role: "sender" | "receiver"): SessionDescriptor {
+  /**
+   * Create a fresh ephemeral session. Identity keys/ids are created per
+   * session by the caller and never loaded from durable storage.
+   *
+   * @param role this endpoint's role.
+   * @param id optional session id. The transfer protocol derives it from
+   *   the Noise transcript hash so both endpoints agree on it (P1-12); when
+   *   omitted a random id is generated (tests). A duplicate id fails closed.
+   */
+  createSession(role: "sender" | "receiver", id?: Uint8Array): SessionDescriptor {
+    this.sweepExpired()
+    const sessionId = id !== undefined ? Uint8Array.from(id) : randomBytes(SESSION_ID_BYTES)
+    if (sessionId.length !== SESSION_ID_BYTES) {
+      throw new AuthorizationError("Session id must be 16 bytes")
+    }
+    const key = hexKey(sessionId)
+    if (this.sessions.has(key)) {
+      throw new AuthorizationError("Session id collision: refusing to reuse a live session")
+    }
     const descriptor: SessionDescriptor = {
-      id: randomBytes(SESSION_ID_BYTES),
+      id: sessionId,
       nonce: randomBytes(NONCE_BYTES),
       role,
       createdAt: this.now(),
     }
-    this.sessions.set(hexKey(descriptor.id), {
+    this.sessions.set(key, {
       descriptor,
       peerIdentity: null,
       confirmations: new Set(),
       usedTokens: new Set(),
       destroyed: false,
+      gateState: "created",
     })
     return descriptor
+  }
+
+  /** Destroy sessions past their TTL. Called on session creation so an
+   *  idle manager cannot accumulate expired state. */
+  sweepExpired(): number {
+    let swept = 0
+    // Deleting during Map iteration is safe: entries already visited are
+    // not revisited, and destroySession only removes the current entry.
+    for (const record of this.sessions.values()) {
+      if (!record.destroyed && this.now() - record.descriptor.createdAt > this.sessionTtlMs) {
+        this.destroySession(record.descriptor.id)
+        swept++
+      }
+    }
+    return swept
   }
 
   /**
@@ -164,6 +210,9 @@ export class SessionManager {
     verifiedPeerIdentity: Uint8Array,
   ): void {
     const session = this.requireLiveSession(sessionId)
+    if (session.gateState !== "created") {
+      throw new AuthorizationError("Identity confirmation is only valid in the created state")
+    }
     if (session.peerIdentity === null) {
       session.peerIdentity = Uint8Array.from(verifiedPeerIdentity)
     } else if (
@@ -175,6 +224,9 @@ export class SessionManager {
       throw new AuthorizationError("Peer identity mismatch: session destroyed")
     }
     session.confirmations.add(endpoint)
+    if (session.confirmations.has("local") && session.confirmations.has("remote")) {
+      session.gateState = "identity-confirmed"
+    }
   }
 
   /** True only after both endpoints independently confirmed. */
@@ -193,7 +245,7 @@ export class SessionManager {
     files: readonly AuthorizedFile[],
   ): TransferAuthorization {
     const session = this.requireLiveSession(sessionId)
-    if (!this.isIdentityConfirmed(sessionId)) {
+    if (session.gateState !== "identity-confirmed") {
       throw new AuthorizationError(
         "Transfer authorization requires both identity confirmations (Gate B)",
       )
@@ -202,20 +254,8 @@ export class SessionManager {
       throw new AuthorizationError("Cannot authorize an empty file set")
     }
     const token = tokenFor(session, files)
+    session.gateState = "transfer-authorized"
     return { token, sessionId: Uint8Array.from(sessionId), files }
-  }
-
-  /**
-   * Validate a presented authorization: session liveness, peer identity,
-   * exact file set, single use. Rejects wrong, expired, replayed, duplicate,
-   * or cross-session presentations (fail closed).
-   */
-  validateAuthorization(
-    presented: TransferAuthorization,
-    verifiedPeerIdentity: Uint8Array,
-  ): void {
-    const session = this.checkAuthorization(presented, verifiedPeerIdentity)
-    session.usedTokens.add(hexKey(presented.token))
   }
 
   /**
@@ -233,6 +273,9 @@ export class SessionManager {
     acceptedFiles: readonly AuthorizedFile[],
   ): AcceptedTransfer {
     const session = this.checkAuthorization(presented, verifiedPeerIdentity)
+    if (session.gateState !== "transfer-authorized") {
+      throw new AuthorizationError("Acceptance requires an authorized transfer (Gate C order)")
+    }
     if (acceptedFiles.length === 0) {
       throw new AuthorizationError("Acceptance requires at least one file")
     }
@@ -243,6 +286,7 @@ export class SessionManager {
       }
     }
     session.usedTokens.add(hexKey(presented.token))
+    session.gateState = "accepted"
     return { sessionId: Uint8Array.from(presented.sessionId), acceptedFiles }
   }
 
@@ -293,6 +337,7 @@ export class SessionManager {
       record.confirmations.clear()
       record.usedTokens.clear()
       record.destroyed = true
+      record.gateState = "destroyed"
       this.sessions.delete(key)
     }
   }

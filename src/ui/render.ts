@@ -21,11 +21,12 @@ export interface RenderData {
   mode: AppMode
   filesystem: FileSystemService
   peerService: PeerService
-  receiveDestinations: readonly [string, ...string[]]
+  receiveDestinations: readonly string[]
   peers: MockPeer[]
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
   actions: RenderActions
+  real?: { bindAddr: string; tcpPort: number } | null
 }
 
 export function renderApp(data: RenderData): void {
@@ -76,7 +77,8 @@ function renderHeader(data: RenderData, width: number, compact: boolean): BoxRen
     flexDirection: width < theme.layout.veryNarrowWidth ? "column" : "row",
     alignItems: "center",
     border: !compact,
-    borderColor: theme.border.subtle,
+    // OpenTUI forces a border when borderColor is set even with border:false.
+    ...(compact ? {} : { borderColor: theme.border.subtle }),
     backgroundColor: theme.color.surface,
     paddingLeft: width < theme.layout.veryNarrowWidth ? 0 : 1,
     paddingRight: 1,
@@ -92,6 +94,11 @@ function renderHeader(data: RenderData, width: number, compact: boolean): BoxRen
   const discoveryLabel = data.mode === "real" ? "DISCOVERY" : "MOCK DISCOVERY"
   const peerText = wideHeader ? `  ${frame} ${discoveryLabel} · ${onlineCount} peers` : `  ${frame} ${onlineCount} ${data.mode === "real" ? "peers" : "mock peers"}`
   header.add(label(renderer, "mock-discovery", truncate(peerText, Math.max(12, width - 22)), theme.color.success))
+  if (data.mode === "real" && wideHeader) {
+    const bind = data.real?.bindAddr ?? "::"
+    const port = data.real?.tcpPort ?? 0
+    header.add(label(renderer, "listen-indicator", `  · LISTENING [${bind}]:${port}`, theme.color.muted))
+  }
   if (wideHeader) {
     const activePeer = peers[state.peerIndex % Math.max(1, peers.length)]
     header.add(label(renderer, "active-peer", `  → ${truncate(activePeer?.name ?? "No peer", 18)}`, theme.color.remote))
@@ -200,8 +207,10 @@ function renderPane(data: RenderData, pane: Pane, paneWidth: number, height: num
     const focused = state.activePane === pane && index === cursor
     const selected = state.staged[pane].has(entry.id)
     const icon = entry.kind === "directory" ? icons.directory : entry.name.endsWith(".gz") ? icons.archive : icons.file
+    // Real mode has no sync-state model; the mock SYNC badge would lie.
+    const realMode = data.mode === "real"
     const stateLabel = entry.kind === "directory" ? "" : ({ synced: "SYNC", added: "NEW", modified: "EDIT", deleted: "DEL" } as const)[entry.state]
-    const left = `${selected ? icons.check : " "} ${stateGlyph(entry.state)} ${icon} `
+    const left = `${selected ? icons.check : " "} ${realMode ? "" : `${stateGlyph(entry.state)} `}${icon} `
     const right = ` ${entry.kind === "directory" ? "DIR" : formatBytes(entry.bytes).padStart(7)}`
     const nameWidth = Math.max(8, paneWidth - left.length - right.length - 7)
     const row = panel(renderer, `${pane}-entry-${entry.id}`, {
@@ -213,14 +222,27 @@ function renderPane(data: RenderData, pane: Pane, paneWidth: number, height: num
       },
     })
     row.add(label(renderer, `${pane}-entry-state-${entry.id}`, left, focused ? theme.color.white : stateColor(entry.state)))
-    row.add(label(renderer, `${pane}-entry-name-${entry.id}`, truncate(entry.name, nameWidth), focused ? theme.color.white : theme.color.text))
-    const meta = entry.kind === "directory" ? "DIR" : `${right.slice(1)} ${stateLabel}`
+    // Unsupported entries (symlink, FIFO…) show their reason instead of a size.
+    const displayName = entry.unsupported ? `${entry.name} [${entry.unsupported}]` : entry.name
+    row.add(label(renderer, `${pane}-entry-name-${entry.id}`, truncate(displayName, nameWidth), focused ? theme.color.white : entry.unsupported ? theme.color.muted : theme.color.text))
+    const meta = entry.kind === "directory" ? "DIR" : realMode ? right.slice(1) : `${right.slice(1)} ${stateLabel}`
     row.add(label(renderer, `${pane}-entry-meta-${entry.id}`, truncate(` ${meta}`, 16), stateColor(entry.state)))
     paneBox.add(row)
   })
 
   if (offset + rows < entries.length) paneBox.add(label(renderer, `${pane}-scroll-bottom`, `↓ ${entries.length - offset - rows} more · mouse wheel to scroll`, theme.color.dim))
-  if (entries.length === 0) paneBox.add(label(renderer, `${pane}-empty`, data.mode === "real" ? "This folder is empty." : "This mock folder is empty.", theme.color.muted))
+  if (entries.length === 0) {
+    const listErr = data.filesystem.listError?.(pane, state.paths[pane])
+    const emptyText = listErr
+      ? `Cannot read folder: ${listErr}`
+      : data.mode === "real" ? "This folder is empty." : "This mock folder is empty."
+    paneBox.add(label(renderer, `${pane}-empty`, emptyText, listErr ? theme.color.danger : theme.color.muted))
+  } else {
+    const total = data.filesystem.listTotal?.(pane, state.paths[pane])
+    if (total !== undefined && total > entries.length) {
+      paneBox.add(label(renderer, `${pane}-truncated`, `Showing first ${entries.length} of ${total} entries`, theme.color.muted))
+    }
+  }
   return paneBox
 }
 
@@ -269,10 +291,12 @@ function renderRemoteStatus(data: RenderData, paneWidth: number, height: number,
     box.add(label(renderer, "status-peer-hint", truncate(`↑/↓ select target · ${peers.length} peer${peers.length === 1 ? "" : "s"}`, Math.max(10, paneWidth - 4)), theme.color.muted))
     peers.slice(0, 8).forEach((p, i) => {
       const selected = i === state.peerIndex % Math.max(1, peers.length)
+      // Manual peers were never probed; discovered peers were seen via multicast.
+      const stateTag = p.online ? "" : " [not probed]"
       box.add(label(
         renderer,
         `status-peer-${i}`,
-        truncate(`${selected ? "▸" : " "} ${p.name}  ${p.host}:${p.port}`, Math.max(10, paneWidth - 4)),
+        truncate(`${selected ? "▸" : " "} ${p.name}  ${p.host}:${p.port}${stateTag}`, Math.max(10, paneWidth - 4)),
         selected ? theme.color.focus : theme.color.text,
       ))
     })
@@ -296,7 +320,8 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
     height: compact ? 1 : 4,
     flexDirection: "column",
     border: !compact,
-    borderColor: theme.border.subtle,
+    // OpenTUI forces a border when borderColor is set even with border:false.
+    ...(compact ? {} : { borderColor: theme.border.subtle }),
     backgroundColor: compact ? theme.color.background : theme.color.surface,
     paddingLeft: compact ? 0 : 1,
   })
@@ -305,12 +330,10 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
     ? `  ${stagedCount} staged · ${formatBytes(stagedBytes)} ${state.activePane} · ${status}`
     : `  ${stagedCount} staged  ·  ${formatBytes(stagedBytes)} in ${state.activePane}  ·  ${state.status}`
   activity.add(label(renderer, "activity-summary", truncate(firstLine, Math.max(12, width - 6)), stagedCount ? theme.color.focus : theme.color.muted))
-  if (!compact) {
+  if (!compact && data.mode !== "real") {
     const legend = narrow
       ? `  ${icons.synced} sync  ${icons.added} add  ${icons.modified} edit  ${icons.deleted} del`
-      : data.mode === "real"
-        ? `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted`
-        : `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted  ·  0 network connections`
+      : `  ${icons.synced} synced  ${icons.added} added  ${icons.modified} modified  ${icons.deleted} deleted  ·  0 network connections`
     activity.add(label(renderer, "activity-legend", truncate(legend, Math.max(12, width - 6)), theme.color.dim))
   }
   parent.add(activity)
@@ -318,10 +341,12 @@ function addActivity(parent: BoxRenderable, data: RenderData, width: number, com
 
 function renderSendReview(parent: BoxRenderable, data: RenderData, width: number): void {
   const { renderer, state, filesystem, actions, peers, mode } = data
-  const files = filesystem.list(state.activePane, state.paths[state.activePane]).filter((entry) => state.staged[state.activePane].has(entry.id))
+  // Real mode always sends from the Local staged set, regardless of focus.
+  const sendPane = mode === "real" ? "local" : state.activePane
+  const files = filesystem.list(sendPane, state.paths[sendPane]).filter((entry) => state.staged[sendPane].has(entry.id))
   const peer = peers[state.peerIndex % Math.max(1, peers.length)]
   const card = pageCard(renderer, "send-review", "Review outgoing files", theme.color.focus, state.revealFrame)
-  card.add(label(renderer, "send-direction", `${state.activePane === "local" ? "Local" : "Remote"} → ${peer?.name ?? "no peer selected"}`, theme.color.remote))
+  card.add(label(renderer, "send-direction", `${sendPane === "local" ? "Local" : "Remote"} → ${peer?.name ?? "no peer selected"}`, theme.color.remote))
   if (mode !== "real") {
     card.add(label(renderer, "send-mock-note", "Mock preview only · no files or network requests are sent.", theme.color.warning))
   }
@@ -349,16 +374,39 @@ function renderConsent(parent: BoxRenderable, data: RenderData, width: number): 
     return
   }
   card.add(label(renderer, "consent-sender", `${request.mode === "incoming" ? "Sender" : "Mock receiver"}: ${request.peer.name}  ·  ${request.peer.host}:${request.peer.port}`, theme.color.remote))
+  // The SAS is the human-confirmable identity: the sender's screen shows the
+  // same code. Confirm it out of band before accepting — the alias above is
+  // attacker-chosen.
+  if (request.sas) {
+    card.add(label(renderer, "consent-sas", `Security code: ${request.sas} · confirm with the sender before accepting`, theme.color.warning))
+  }
   card.add(label(renderer, "consent-count", `${request.files.length} proposed  ·  ${request.files.filter((file) => file.accepted).length} selected  ·  ${totalBytes(request.files.filter((file) => file.accepted))}`, theme.color.white))
-  card.add(label(renderer, "consent-destination", `Destination: ${data.receiveDestinations[state.receiveDestinationIndex % data.receiveDestinations.length]}  [D] change`, theme.color.muted))
+  const destIndex = state.receiveDestinationIndex % Math.max(1, data.receiveDestinations.length)
+  const destActive = data.receiveDestinations[destIndex] ?? ""
+  card.add(label(renderer, "consent-destination", `Destination: ${destActive} (${destIndex + 1}/${data.receiveDestinations.length})  [D] cycle · [+] add · [-] remove`, theme.color.muted))
   card.add(label(renderer, "consent-scope", "Review every item. Nothing streams until you accept this transfer.", theme.color.warning))
   const list = panel(renderer, "consent-file-list", { flexDirection: "column", flexGrow: 1, minHeight: 1, marginTop: 1 })
-  request.files.forEach((file, index) => list.add(renderConsentFile(renderer, file, index, state, actions, width)))
+  // Scrollable window: the list can hold 25 files but only ~10 rows fit.
+  const windowSize = 10
+  const offset = Math.min(state.consentScrollOffset, Math.max(0, request.files.length - windowSize))
+  const visible = request.files.slice(offset, offset + windowSize)
+  visible.forEach((file, i) => list.add(renderConsentFile(renderer, file, offset + i, state, actions, width)))
+  if (request.files.length > windowSize) {
+    const acceptedCount = request.files.filter((f) => f.accepted).length
+    const moreAbove = offset > 0 ? `↑ ${offset} more` : ""
+    const moreBelow = offset + windowSize < request.files.length ? `↓ ${request.files.length - offset - windowSize} more` : ""
+    card.add(label(renderer, "consent-scroll-hint", `${moreAbove}${moreAbove && moreBelow ? " · " : ""}${moreBelow} · ${acceptedCount}/${request.files.length} accepted`, theme.color.muted))
+  }
   card.add(list)
   const focused = request.files[state.selectedConsentFile]
   card.add(actionRow(renderer, "consent-file-options", [
     actionButton(renderer, "toggle-selected", `${focused?.accepted ? "Skip" : "Include"} file · Space`, "toggle-consent", actions.command, { fg: theme.color.warning }),
-    actionButton(renderer, "rename-selected", `${focused?.renamed ? "Undo rename" : "Rename"} · R`, "rename-consent", actions.command, { fg: theme.color.remote }),
+    // Rename is a mock-era control with no real effect; hide it in real mode.
+    // Destination is real in both modes (issue #27): files land in the
+    // selected destination.
+    ...(request.mode === "incoming" ? [] : [
+      actionButton(renderer, "rename-selected", `${focused?.renamed ? "Undo rename" : "Rename"} · R`, "rename-consent", actions.command, { fg: theme.color.remote }),
+    ]),
     actionButton(renderer, "destination-select", "Destination · D", "cycle-destination", actions.command, { fg: theme.color.muted }),
   ], width < theme.layout.veryNarrowWidth))
   card.add(label(renderer, "consent-separation", "Per-transfer choice only · Favorites and manual fingerprint comparison do not grant consent.", theme.color.dim))
@@ -514,6 +562,7 @@ function renderHelp(parent: BoxRenderable, data: RenderData, width: number): voi
     ["i", mode === "real" ? "Incoming transfers arrive from the network" : "Create a mock incoming request"],
     ["q / v / p", mode === "real" ? "Peer list is in the Receiver pane" : "Peer preview / manual fingerprint comparison / Favorites"],
     ["d / t / ?", "Diff / transfer queue / help"],
+    ["D / + / - (consent)", "Cycle / add / remove the receive destination"],
     ["Mouse", "Click rows and actions; scroll panes to browse"],
     ["Narrow screens", "Use Local / Remote tabs and the Stage, Send, and Receive toolbar actions"],
     ["Esc / Ctrl+C", "Back or cancel / quit"],

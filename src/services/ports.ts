@@ -15,6 +15,10 @@ export interface FileSystemService {
   parentPath(path: string): string
   markSynced(pane: Pane, ids: string[]): void
   getDiff(id: string): string[]
+  /** Total entries before truncation (real fs only); undefined if unknown. */
+  listTotal?(pane: Pane, path: string): number | undefined
+  /** Last list() error for this path (real fs only); null if none. */
+  listError?(pane: Pane, path: string): string | null
 }
 
 export interface PeerService {

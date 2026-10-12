@@ -15,6 +15,8 @@ export interface MockEntry {
   bytes: number
   state: SyncState
   summary?: string
+  /** Set for entries that cannot be sent (symlink, FIFO, socket, device). */
+  unsupported?: string
 }
 
 export interface MockPeer {
@@ -51,6 +53,8 @@ export interface ConsentRequest {
   files: ConsentFile[]
   createdAt: number
   sourcePane?: Pane
+  /** Short auth string for out-of-band confirmation (real incoming only). */
+  sas?: string
 }
 
 export interface TransferRecord {
@@ -86,7 +90,10 @@ export interface AppState {
   diffHunk: number
   request: ConsentRequest | null
   selectedConsentFile: number
+  consentScrollOffset: number
   receiveDestinationIndex: number
+  /** Non-null while the user is typing a new destination path (issue #27). */
+  destinationInput: string | null
   transferQueue: TransferRecord[]
   activeTransferId: string | null
   reducedMotion: boolean
