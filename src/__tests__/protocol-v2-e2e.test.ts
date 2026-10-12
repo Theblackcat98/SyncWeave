@@ -322,3 +322,88 @@ test("e2e: wrong expectedPeerId → sender throws mismatch; receiver never sees 
     await cleanup(h)
   }
 }, 30_000)
+
+test("e2e: consent deadline → silent peer's transfer declines after timeout", async () => {
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "patient.txt", 100)
+    const senderIdentity = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+
+    const receiverDone = (async () => {
+      const hs = await h.nextChannel()
+      // onTransferRequest never resolves: the 300ms deadline must fire and
+      // decline the transfer instead of holding the prompt forever.
+      await expect(
+        receiveFiles({
+          channel: hs.channel,
+          handshakeHash: hs.handshakeHash,
+          expectedPeerId: senderIdentity.peerId,
+          identity: receiverIdentity,
+          destinationDirectory: h.destDir,
+          consentTimeoutMs: 300,
+          onTransferRequest: () => new Promise<never>(() => {}),
+        }),
+      ).rejects.toThrow(/consent timed out/)
+    })()
+
+    const sendErr = await sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "patient.txt" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: senderIdentity,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    // The receiver's timeout sends an ERROR frame; the sender must not hang.
+    expect(sendErr).not.toBeNull()
+    await receiverDone
+    expect(await readdir(h.destDir)).toHaveLength(0)
+  } finally {
+    await cleanup(h)
+  }
+}, 30_000)
+
+test("e2e: abort signal cancels an in-flight send", async () => {
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "cancelled.bin", 50_000_000)
+    const senderIdentity = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+
+    const receiverDone = (async () => {
+      const hs = await h.nextChannel()
+      await receiveFiles({
+        channel: hs.channel,
+        handshakeHash: hs.handshakeHash,
+        expectedPeerId: senderIdentity.peerId,
+        identity: receiverIdentity,
+        destinationDirectory: h.destDir,
+        onTransferRequest: async ({ files }) => files, // accept everything
+      }).catch(() => null) // abort on the sender side is fine here
+    })()
+
+    const aborter = new AbortController()
+    const sendPromise = sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "cancelled.bin" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: senderIdentity,
+      signal: aborter.signal,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    // Let the transfer start, then cancel (this is what Esc now triggers).
+    await new Promise((r) => setTimeout(r, 200))
+    aborter.abort(new Error("cancelled by user"))
+    const sendErr = await sendPromise
+    expect(sendErr).toBeInstanceOf(SendAbortedError)
+    await receiverDone
+  } finally {
+    await cleanup(h)
+  }
+}, 30_000)

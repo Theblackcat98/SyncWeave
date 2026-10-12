@@ -1002,6 +1002,12 @@ export interface ReceiveOptions {
    */
   identity?: EphemeralIdentity
   signal?: AbortSignal
+  /**
+   * Consent deadline in milliseconds. Defaults to 60s: a peer that
+   * handshakes then goes silent must not hold the receiver's prompt
+   * forever. Expiry declines the transfer with E_CONSENT_TIMEOUT.
+   */
+  consentTimeoutMs?: number
   /** Progress callback for UI: (fileIndex, fileName, bytesReceived, fileBytes). */
   onProgress?: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => void
 }
@@ -1105,9 +1111,25 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
     parser.transitionTo("request-review")
 
     // 4. Gate C: the user's explicit, separate acceptance of the exact set.
+    // Consent deadline: a peer that handshakes then goes silent must not
+    // hold the receiver's prompt forever. Expiry declines the transfer.
     let accepted: ProtocolFile[]
     try {
-      accepted = await onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas })
+      const consentDeadlineMs = options.consentTimeoutMs ?? 60_000
+      const consentDeadline = new AbortController()
+      const consentTimer = setTimeout(() => {
+        consentDeadline.abort(new Error(`consent timed out after ${consentDeadlineMs}ms: sender went silent`))
+      }, consentDeadlineMs)
+      try {
+        accepted = await Promise.race([
+          onTransferRequest({ peerId: verifiedSenderId, files: requestFiles, sas }),
+          new Promise<never>((_, reject) => {
+            consentDeadline.signal.addEventListener("abort", () => reject(consentDeadline.signal.reason), { once: true })
+          }),
+        ])
+      } finally {
+        clearTimeout(consentTimer)
+      }
     } catch (error) {
       await signalPeer(
         FrameType.Error,

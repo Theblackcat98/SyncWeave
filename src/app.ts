@@ -760,7 +760,11 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           }
           state.identityStep = 0; setScreen("peer")
         }
-        else if (name === "escape") setScreen("workspace")
+        else if (name === "escape") {
+          // Esc cancels an in-flight real send first; otherwise back to workspace.
+          if (mode === "real" && cancelRealSend()) return
+          setScreen("workspace")
+        }
         return
       case "consent": handleConsentKey(key); return
       case "transfer": handleTransferKey(key); return
@@ -935,6 +939,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
    * sendFiles with progress. Called from the send-review confirm action.
    */
   let realSendInFlight = false
+  let realSendAborter: AbortController | null = null
+  /** Cancel key (Esc/x) for an in-flight real send. */
+  function cancelRealSend(): boolean {
+    if (realSendInFlight && realSendAborter) {
+      realSendAborter.abort(new Error("cancelled by user"))
+      state.status = "Cancelling send…"
+      render()
+      return true
+    }
+    return false
+  }
   async function beginRealSend(real: RealTransport): Promise<void> {
     // A double Enter must not send twice.
     if (realSendInFlight) {
@@ -968,6 +983,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     // (The transfer screen is mock-driven and would show "No transfer is active.")
     render()
     realSendInFlight = true
+    realSendAborter = new AbortController()
     logEvent("transfer-start", `send ${fileList.length} file(s) to ${destination.name} (${destination.host}:${destination.port})`)
     // Real transfer-status model: the queue shows actual transfers, not mock
     // simulations. Fed by send/receive; the mock service is a null in real mode.
@@ -995,6 +1011,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         // TOFU (their ID is unknown until the handshake verifies it).
         // Identity is fresh per session (P1-13); never reuse one.
         expectedPeerId: destination.fingerprint.startsWith("manual:") ? undefined : destination.fingerprint,
+        signal: realSendAborter.signal,
         onProgress: (fileIndex, fileName, bytesSent, fileBytes) => {
           const pct = Math.round((bytesSent / Math.max(1, fileBytes)) * 100)
           state.status = `Sending ${fileName} (${fileIndex + 1}/${fileList.length}) · ${pct}%`
@@ -1049,6 +1066,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       logEvent("transfer-fail", `send to ${destination.name}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       realSendInFlight = false
+      realSendAborter = null
     }
     render()
   }

@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { createSyncWeaveApp, type RealTransport } from "./app.js"
 import { parseArgs } from "./cli-args.js"
 import { logEvent } from "./services/diagnostic-log.js"
+import type { FileSystemService } from "./services/ports.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "./services/mock-transfer-service.js"
@@ -22,6 +23,17 @@ function fatal(message: string): never {
   process.stderr.write(`syncweave: ${message}\n`)
   process.exit(1)
 }
+
+// Last-resort handlers: restore the terminal and exit nonzero instead of
+// dying mid-alternate-screen with a broken terminal.
+process.on("uncaughtException", (error) => {
+  process.stderr.write(`syncweave: uncaught exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
+  process.exit(1)
+})
+process.on("unhandledRejection", (reason) => {
+  process.stderr.write(`syncweave: unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}\n`)
+  process.exit(1)
+})
 
 let cli: ReturnType<typeof parseArgs>
 try {
@@ -152,9 +164,11 @@ if (!realMode) {
   }
   const app = createSyncWeaveApp(renderer, {
     // Real mode gets null services: the mock peer/transfer services simulate
-    // network behavior and must not exist in real mode. Real transfers feed
+    // network behavior and must not exist in real mode. The filesystem is
+    // replaced by RealFileSystemService inside createSyncWeaveApp, so no
+    // mock filesystem is constructed either. Real transfers feed
     // state.transferQueue directly.
-    filesystem: new MockFileSystemService(), // replaced by RealFileSystemService in real mode
+    filesystem: null as unknown as FileSystemService,
     peerService: new NullPeerService(),
     transferService: new NullTransferService(),
     receiveDestinations: [receiveDirectory] as unknown as readonly [string, ...string[]],
