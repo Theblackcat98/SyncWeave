@@ -21,7 +21,7 @@ export function fakeRealTransport(peers: Array<{ peerId: string; alias: string; 
   const never = new Promise<never>(() => {})
   return {
     identity: generateEphemeralIdentity(),
-    listener: { accept: async function* () { await never }, close: async () => {} },
+    listener: { accept: async function* () { await never; yield* [] }, close: async () => {} },
     discovery: { listPeers: () => peers.map((peer) => ({ ...peer, lastSeen: Date.now() })), stop: () => {} },
     alias: "ui-test",
     tcpPort: 24816,
