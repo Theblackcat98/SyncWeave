@@ -82,13 +82,30 @@ test("unreadable or missing directories list gracefully instead of throwing", ()
   expect(service().list("local", join(dir, "no-such-dir"))).toEqual([])
 })
 
-test("directory listings are capped instead of failing on huge folders", () => {
-  for (let i = 0; i < MAX_DIRECTORY_ENTRIES + 100; i++) {
-    writeFileSync(join(dir, `file-${String(i).padStart(4, "0")}.txt`), "x")
+test("a 600-file folder lists every entry, including the tail past the old 500 cap", () => {
+  for (let i = 0; i < 600; i++) {
+    writeFileSync(join(dir, `file-${String(i).padStart(3, "0")}.txt`), "x")
   }
-  const entries = service().list("local", dir)
-  expect(entries).toHaveLength(MAX_DIRECTORY_ENTRIES)
+  const fs = service()
+  const entries = fs.list("local", dir)
+  expect(entries).toHaveLength(600)
+  expect(entries.map((entry) => entry.name)).toContain("file-599.txt")
+  expect(fs.listTotal()).toBe(600)
 })
+
+test("paging reaches the tail of a folder larger than the default listing cap", () => {
+  const total = MAX_DIRECTORY_ENTRIES + 25
+  for (let i = 0; i < total; i++) {
+    writeFileSync(join(dir, `f${String(i).padStart(5, "0")}`), "")
+  }
+  const fs = service()
+  expect(fs.list("local", dir)).toHaveLength(MAX_DIRECTORY_ENTRIES)
+  expect(fs.listTotal()).toBe(total)
+  const tail = fs.list("local", dir, { offset: MAX_DIRECTORY_ENTRIES, limit: 100 })
+  expect(tail.map((entry) => entry.name)).toEqual(
+    Array.from({ length: 25 }, (_, i) => `f${String(MAX_DIRECTORY_ENTRIES + i).padStart(5, "0")}`),
+  )
+}, 60_000)
 
 test("the remote pane has no filesystem in real mode", () => {
   writeFileSync(join(dir, "a.txt"), "hello")
