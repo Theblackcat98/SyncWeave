@@ -1,7 +1,8 @@
 import { CliRenderEvents, type CliRenderer, type KeyEvent } from "@opentui/core"
-import type { AppState, ConsentRequest, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
+import type { AppMode, AppState, ConsentRequest, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
 import { OTHER_PANE } from "./domain.js"
 import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
+import { RealFileSystemService } from "./services/real-filesystem.js"
 import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
 import { motion } from "./theme.js"
 import { AnimationClock } from "./ui/animation-clock.js"
@@ -13,6 +14,12 @@ export interface AppDependencies {
   transferService: TransferService
   receiveDestinations: readonly [string, ...string[]]
   reducedMotion?: boolean
+  /**
+   * "mock" (default) renders the deterministic simulation. "real" swaps the
+   * local pane to the real filesystem and replaces the remote file list with
+   * a receiver status panel — the receiver's files are never shown.
+   */
+  mode?: AppMode
 }
 
 export interface SyncWeaveApp {
@@ -23,7 +30,12 @@ export interface SyncWeaveApp {
 }
 
 export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDependencies): SyncWeaveApp {
-  const { filesystem, peerService, transferService, receiveDestinations } = dependencies
+  const mode: AppMode = dependencies.mode ?? "mock"
+  // In real mode the local pane is always the real filesystem; the remote
+  // pane has no filesystem (the receiver's files are out of scope).
+  const filesystem: FileSystemService =
+    mode === "real" ? new RealFileSystemService() : dependencies.filesystem
+  const { peerService, transferService, receiveDestinations } = dependencies
   const peers = peerService.discover()
   const state = createInitialAppState(filesystem.paths, dependencies.reducedMotion)
   const clock = new AnimationClock()
@@ -42,6 +54,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     renderApp({
       renderer,
       state,
+      mode,
       filesystem,
       peerService,
       receiveDestinations,
@@ -296,20 +309,20 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.paths[state.activePane] = `${state.paths[state.activePane].replace(/\/$/, "")}/${entry.name.replace(/\/$/, "")}`
     state.cursors[state.activePane] = 0
     state.scrollOffsets[state.activePane] = 0
-    state.status = `Opened mock folder ${entry.name}`
+    state.status = `Opened ${mode === "real" ? "folder" : "mock folder"} ${entry.name}`
     render()
   }
 
   function goParentDirectory(): void {
     if (state.paths[state.activePane] === filesystem.paths[state.activePane]) {
-      state.status = "Already at the top of this mock workspace"
+      state.status = mode === "real" ? "Already at the top of this folder" : "Already at the top of this mock workspace"
       render()
       return
     }
     state.paths[state.activePane] = filesystem.parentPath(state.paths[state.activePane])
     state.cursors[state.activePane] = 0
     state.scrollOffsets[state.activePane] = 0
-    state.status = "Moved to parent mock folder"
+    state.status = mode === "real" ? "Moved to parent folder" : "Moved to parent mock folder"
     render()
   }
 

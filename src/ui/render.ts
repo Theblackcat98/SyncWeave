@@ -1,5 +1,5 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
-import type { AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
+import type { AppMode, AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
 import { formatBytes, OTHER_PANE } from "../domain.js"
 import type { FileSystemService, PeerService } from "../services/ports.js"
 import { icons, motion, theme } from "../theme.js"
@@ -18,6 +18,7 @@ export interface RenderActions {
 export interface RenderData {
   renderer: CliRenderer
   state: AppState
+  mode: AppMode
   filesystem: FileSystemService
   peerService: PeerService
   receiveDestinations: readonly [string, ...string[]]
@@ -69,7 +70,7 @@ export function renderApp(data: RenderData): void {
 }
 
 function renderHeader(data: RenderData, width: number, compact: boolean): BoxRenderable {
-  const { renderer, state, peers } = data
+  const { renderer, state, mode, peers } = data
   const header = panel(renderer, "header", {
     height: width < theme.layout.veryNarrowWidth ? 4 : compact ? 1 : 3,
     flexDirection: width < theme.layout.veryNarrowWidth ? "column" : "row",
@@ -93,13 +94,13 @@ function renderHeader(data: RenderData, width: number, compact: boolean): BoxRen
   if (wideHeader) {
     const activePeer = peers[state.peerIndex % Math.max(1, peers.length)]
     header.add(label(renderer, "active-peer", `  → ${truncate(activePeer?.name ?? "No peer", 18)}`, theme.color.remote))
-    header.add(label(renderer, "phase-label", "  · SIMULATION", theme.color.warning))
+    header.add(label(renderer, "phase-label", mode === "real" ? "  · REAL FILES" : "  · SIMULATION", theme.color.warning))
   }
   return header
 }
 
 function renderWorkspace(parent: BoxRenderable, data: RenderData, width: number, height: number, compact: boolean): void {
-  const { renderer, state, actions, filesystem, peers } = data
+  const { renderer, state, mode, actions, filesystem, peers } = data
   const bodyHeader = panel(renderer, "workspace-toolbar", {
     height: width < theme.layout.veryNarrowWidth ? 3 : compact ? 1 : 2,
     flexDirection: "row",
@@ -110,7 +111,7 @@ function renderWorkspace(parent: BoxRenderable, data: RenderData, width: number,
   bodyHeader.add(label(renderer, "workspace-title", compact || width < theme.layout.dualPaneMinWidth ? "WORKSPACE" : "  WORKSPACE  ·  Local changes, clearly staged", theme.typography.heading))
   if (width < theme.layout.dualPaneMinWidth) {
     bodyHeader.add(actionButton(renderer, "tab-local", "1 Local", "pane-local", actions.command, { fg: state.activePane === "local" ? theme.color.focus : theme.color.muted }))
-    bodyHeader.add(actionButton(renderer, "tab-remote", "2 Remote", "pane-remote", actions.command, { fg: state.activePane === "remote" ? theme.color.remote : theme.color.muted }))
+    bodyHeader.add(actionButton(renderer, "tab-remote", mode === "real" ? "2 Receiver" : "2 Remote", "pane-remote", actions.command, { fg: state.activePane === "remote" ? theme.color.remote : theme.color.muted }))
     bodyHeader.add(actionButton(renderer, "toolbar-stage", "Stage · Space", "toggle-current", actions.command))
     bodyHeader.add(actionButton(renderer, "toolbar-send", "Send", "send-review", actions.command))
     bodyHeader.add(actionButton(renderer, "toolbar-receive", "Receive", "incoming", actions.command, { fg: theme.color.success }))
@@ -134,12 +135,27 @@ function renderWorkspace(parent: BoxRenderable, data: RenderData, width: number,
   parent.add(workspace)
   if (width >= theme.layout.dualPaneMinWidth) {
     workspace.add(renderPane(data, "local", Math.floor((width - 8) / 2), height, compact))
-    workspace.add(renderPane(data, "remote", Math.floor((width - 8) / 2), height, compact))
+    // In real mode the receiver's files are never shown: the remote pane is
+    // a status panel, not a file list (out of scope).
+    workspace.add(
+      mode === "real"
+        ? renderRemoteStatus(data, Math.floor((width - 8) / 2), height, compact)
+        : renderPane(data, "remote", Math.floor((width - 8) / 2), height, compact),
+    )
   } else {
-    workspace.add(renderPane(data, state.activePane, width - 2, height, compact))
+    const showRemoteStatus = mode === "real" && state.activePane === "remote"
+    workspace.add(
+      showRemoteStatus
+        ? renderRemoteStatus(data, width - 2, height, compact)
+        : renderPane(data, state.activePane, width - 2, height, compact),
+    )
     if (!compact) {
       const note = peers[state.peerIndex % Math.max(1, peers.length)]
-      workspace.add(label(renderer, "narrow-peer-note", `Target: ${note?.name ?? "No mock peer"}  ·  ${state.activePane === "local" ? "Local → Remote" : "Remote → Local"}  ·  all data is simulated`, theme.color.muted))
+      const noteText =
+        mode === "real"
+          ? `Target: ${note?.name ?? "No peer"}  ·  local files are real  ·  receiver files are not shown`
+          : `Target: ${note?.name ?? "No mock peer"}  ·  ${state.activePane === "local" ? "Local → Remote" : "Remote → Local"}  ·  all data is simulated`
+      workspace.add(label(renderer, "narrow-peer-note", noteText, theme.color.muted))
     }
   }
 }
@@ -203,8 +219,52 @@ function renderPane(data: RenderData, pane: Pane, paneWidth: number, height: num
   })
 
   if (offset + rows < entries.length) paneBox.add(label(renderer, `${pane}-scroll-bottom`, `↓ ${entries.length - offset - rows} more · mouse wheel to scroll`, theme.color.dim))
-  if (entries.length === 0) paneBox.add(label(renderer, `${pane}-empty`, "This mock folder is empty.", theme.color.muted))
+  if (entries.length === 0) paneBox.add(label(renderer, `${pane}-empty`, data.mode === "real" ? "This folder is empty." : "This mock folder is empty.", theme.color.muted))
   return paneBox
+}
+
+/**
+ * Real-mode replacement for the remote file list. The receiver's files are
+ * never shown (out of scope): this panel reports peer/session state and
+ * transfer status only, with no file rows and no staging controls.
+ */
+function renderRemoteStatus(data: RenderData, paneWidth: number, height: number, compact: boolean): BoxRenderable {
+  const { renderer, state, peers, queue } = data
+  const focused = state.activePane === "remote"
+  const borderColor = focused
+    ? state.focusFrame < motion.focusGlow.length - 1
+      ? motion.focusGlow[state.focusFrame]
+      : theme.border.remoteFocus
+    : theme.border.subtle
+  const box = panel(renderer, "remote-status", {
+    flexGrow: 1,
+    minWidth: 20,
+    minHeight: 1,
+    flexDirection: "column",
+    border: true,
+    borderColor,
+    title: " REMOTE RECEIVER ",
+    titleColor: borderColor,
+    backgroundColor: theme.color.surface,
+    paddingLeft: 1,
+    paddingRight: 1,
+    paddingTop: compact || height <= 26 ? 0 : 1,
+  })
+  const peer = peers[state.peerIndex % Math.max(1, peers.length)]
+  const active = queue.find((record) => record.id === state.activeTransferId)
+  const latest = queue[queue.length - 1]
+  const lines: Array<[string, string]> = [
+    ["status-peer", `Peer: ${peer ? `${peer.name} (${peer.host}:${peer.port})` : "none selected"}`],
+    ["status-session", `Session: ${active ? `transfer ${active.status}` : "no active session"}`],
+    ["status-transfer", `Transfer: ${active ? `${active.acceptedFiles.length} files · ${active.progress}%` : latest ? `last ${latest.status}` : "idle"}`],
+  ]
+  for (const [id, text] of lines) {
+    box.add(label(renderer, id, truncate(text, Math.max(10, paneWidth - 4)), theme.color.text))
+  }
+  box.add(label(renderer, "status-scope-1", truncate("The receiver's files are not shown here.", Math.max(10, paneWidth - 4)), theme.color.muted))
+  box.add(label(renderer, "status-scope-2", truncate("Browsing a peer's filesystem is out of scope.", Math.max(10, paneWidth - 4)), theme.color.muted))
+  box.add(label(renderer, "status-scope-3", truncate("Each transfer needs the receiver's consent.", Math.max(10, paneWidth - 4)), theme.color.muted))
+  return box
 }
 
 function addActivity(parent: BoxRenderable, data: RenderData, width: number, compact: boolean): void {
