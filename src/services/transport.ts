@@ -81,11 +81,15 @@ class SocketReader {
         // After the yield, whatever is buffered is all there is.
         break
       }
-      if (signal?.aborted) throw new DOMException("aborted", "AbortError")
+      if (signal?.aborted) {
+        const reason = signal.reason
+        throw reason instanceof Error ? reason : new DOMException(String(reason ?? "aborted"), "AbortError")
+      }
       await new Promise<void>((resolve, reject) => {
         const onAbort = () => {
           this.waiters = this.waiters.filter((w) => w !== done)
-          reject(new DOMException("aborted", "AbortError"))
+          const reason = signal?.reason
+          reject(reason instanceof Error ? reason : new DOMException(String(reason ?? "aborted"), "AbortError"))
         }
         const done = () => {
           signal?.removeEventListener("abort", onAbort)
@@ -194,15 +198,32 @@ export class NoiseChannel {
    * parser: decrypted chunks are buffered and served as exact-size reads.
    */
   asByteSource(signal?: AbortSignal): {
-    read(n: number): Promise<Uint8Array | null>
+    read(n: number, signal?: AbortSignal): Promise<Uint8Array | null>
   } {
     const iterator = this.receive(signal)[Symbol.asyncIterator]()
     let buffered = new Uint8Array(0)
     let done = false
     return {
-      read: async (n: number): Promise<Uint8Array | null> => {
+      read: async (n: number, readSignal?: AbortSignal): Promise<Uint8Array | null> => {
+        // The frame parser passes a per-read timeout signal here; the
+        // generator only knows the session-level signal from creation, so
+        // race the iterator against the per-read signal. (Without this,
+        // body/header timeouts never fire.)
+        const effective = readSignal ?? signal
         while (buffered.length < n && !done) {
-          const next = await iterator.next()
+          if (effective?.aborted) {
+            throw new DOMException(String(effective.reason ?? "aborted"), "AbortError")
+          }
+          const next = await Promise.race([
+            iterator.next(),
+            new Promise<never>((_, reject) => {
+              effective?.addEventListener(
+                "abort",
+                () => reject(new DOMException(String(effective.reason ?? "aborted"), "AbortError")),
+                { once: true },
+              )
+            }),
+          ])
           if (next.done) {
             done = true
             break
@@ -278,8 +299,13 @@ export interface HandshakeResult {
 async function runHandshake(socket: Socket, initiator: boolean, signal?: AbortSignal): Promise<HandshakeResult> {
   // Enforce the 60s handshake budget (recorded decision): a peer that
   // connects and sends nothing must not wedge the accept loop forever.
-  const budget = AbortSignal.timeout(HANDSHAKE_TIMEOUT_MS)
-  const hsSignal = signal ? AbortSignal.any([signal, budget]) : budget
+  // The timeout carries a reason so the user sees *what* timed out.
+  const budget = new AbortController()
+  const budgetTimer = setTimeout(() => {
+    budget.abort(new Error(`Noise handshake timed out after ${HANDSHAKE_TIMEOUT_MS / 1000}s: peer stopped responding`))
+  }, HANDSHAKE_TIMEOUT_MS)
+  const hsSignal = signal ? AbortSignal.any([signal, budget.signal]) : budget.signal
+  try {
   // The reader is created once per socket and handed to the channel: bytes
   // that arrive pipelined after the handshake must not be discarded.
   const reader = new SocketReader(socket)
@@ -317,6 +343,9 @@ async function runHandshake(socket: Socket, initiator: boolean, signal?: AbortSi
     channel: new NoiseChannel(socket, send, receive, reader),
     remoteStatic,
     handshakeHash: handshake.handshakeHash,
+  }
+  } finally {
+    clearTimeout(budgetTimer)
   }
 }
 

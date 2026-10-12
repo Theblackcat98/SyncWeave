@@ -409,15 +409,23 @@ export class FrameParser {
     let offset = 0
     // Bound the whole body read: a sender dribbling bytes forever must not
     // hang the receiver. (Header reads already have their own timeout.)
-    const bodyTimeout = AbortSignal.timeout(this.options.bodyTimeoutMs ?? 60_000)
-    const bodySignal = signal ? AbortSignal.any([signal, bodyTimeout]) : bodyTimeout
-    while (offset < header.bodyLength) {
-      const chunk = await this.source.read(header.bodyLength - offset, bodySignal)
-      if (chunk === null || chunk.length === 0) {
-        throw new FrameRejectedError("truncated frame body", this.protocolState)
+    // The reason propagates so the user sees *what* timed out.
+    const bodyBudget = new AbortController()
+    const bodyTimer = setTimeout(() => {
+      bodyBudget.abort(new Error(`frame body timed out after ${(this.options.bodyTimeoutMs ?? 60_000) / 1000}s: sender stalled mid-frame`))
+    }, this.options.bodyTimeoutMs ?? 60_000)
+    const bodySignal = signal ? AbortSignal.any([signal, bodyBudget.signal]) : bodyBudget.signal
+    try {
+      while (offset < header.bodyLength) {
+        const chunk = await this.source.read(header.bodyLength - offset, bodySignal)
+        if (chunk === null || chunk.length === 0) {
+          throw new FrameRejectedError("truncated frame body", this.protocolState)
+        }
+        out.set(chunk.subarray(0, header.bodyLength - offset), offset)
+        offset += Math.min(chunk.length, header.bodyLength - offset)
       }
-      out.set(chunk.subarray(0, header.bodyLength - offset), offset)
-      offset += Math.min(chunk.length, header.bodyLength - offset)
+    } finally {
+      clearTimeout(bodyTimer)
     }
     this.counters.bodyBytesConsumed += header.bodyLength
     return out
