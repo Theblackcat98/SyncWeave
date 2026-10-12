@@ -41,8 +41,10 @@ must be updated.
 
 - **Peer identity, per session.** A fresh ephemeral X25519 static key per session
   for the Noise handshake, and a fresh ephemeral Ed25519 identity per session.
-  The identity is shown as a libp2p-style Peer ID (protobuf-encoded Ed25519 public
-  key, identity multihash, base58btc). No identity keys or IDs are persisted.
+  The identity is shown as a Peer ID: `z` + base58btc of the protobuf-encoded
+  Ed25519 public key (`08 01 12 20 <32-byte key>`), with no multihash wrapper —
+  it is NOT a libp2p Peer ID (no identity-multihash header, no `12D3KooW`
+  prefix). See `src/services/peer-id.ts`. No identity keys or IDs are persisted.
   Status: implemented.
 
 - **Identity check: security code, not discovery.** *Amended 2026-10-12.* The
@@ -190,8 +192,10 @@ transfer. Status: implemented.
   Status: implemented.
 - **Lint.** Biome 2, lint only. The formatter is off, so the existing code style is
   not rewritten. Rules that flag the existing style are turned off in `biome.json`.
-  `noUnsafeFinally` is off until the `safe-receive-sink.ts` finally-block issue
-  (R8) is fixed. Status: implemented, with that exception.
+  `noUnsafeFinally` is off; the `safe-receive-sink.ts` finally-block issue (R8)
+  that motivated the exception is fixed (the `published` flag now guards the
+  finally block), so the rule can be re-enabled. Status: implemented, with that
+  exception pending cleanup.
 - **Strict TypeScript.** `strict`, `noImplicitOverride` and
   `noFallthroughCasesInSwitch` are on. `noUnusedLocals` and `noUnusedParameters`
   are off. Turning them on currently reports 11 unused declarations in `src/`

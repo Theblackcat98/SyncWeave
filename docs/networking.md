@@ -36,7 +36,7 @@ and immediately on start. Peers expire after 15 seconds of silence.
 `--peer [::1]:24816`). Manual peers never expire. They are verified exactly like
 discovered peers, with the security code. There is no trust-on-first-use (TOFU)
 pinning: nothing about a peer is stored between runs. Invalid `--peer` values are
-skipped with a warning.
+rejected: `parsePeerSpec` throws `UsageError` and the process exits with status 2.
 
 ## Protocol v2
 
