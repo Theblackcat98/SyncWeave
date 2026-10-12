@@ -457,3 +457,55 @@ test("e2e: receiver disconnect mid-transfer → sender fails (no hang, no succes
     await cleanup(h)
   }
 }, 30_000)
+
+test("e2e: destinationDirectory as a function is resolved per file (consent-screen picker)", async () => {
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "picked.txt", 100)
+    const senderIdentity = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+
+    // Simulate the consent screen: the user picks a different destination
+    // AFTER the request arrives but before accepting.
+    let chosenDir: string | null = null
+    let resolveCount = 0
+    const receiverDone = (async () => {
+      const hs = await h.nextChannel()
+      await receiveFiles({
+        channel: hs.channel,
+        handshakeHash: hs.handshakeHash,
+        expectedPeerId: senderIdentity.peerId,
+        identity: receiverIdentity,
+        destinationDirectory: () => {
+          resolveCount++
+          return chosenDir ?? h.destDir
+        },
+        onTransferRequest: async ({ files }) => {
+          // User presses [D]/[+] on the consent screen here.
+          const alt = await mkdtemp(join(tmpdir(), "sw-alt-"))
+          chosenDir = alt
+          return files
+        },
+      })
+    })()
+
+    const result = await sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "picked.txt" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: senderIdentity,
+    })
+    expect(result.outcomes[0]!.ok).toBe(true)
+    await receiverDone
+    // The getter was consulted, and the file landed in the picked dir.
+    expect(resolveCount).toBeGreaterThan(0)
+    expect(chosenDir).not.toBeNull()
+    const landed = await readdir(chosenDir!)
+    expect(landed.some((n) => n.startsWith("picked"))).toBe(true)
+    expect(await readdir(h.destDir)).toHaveLength(0)
+    await rm(chosenDir!, { recursive: true, force: true })
+  } finally {
+    await cleanup(h)
+  }
+}, 30_000)

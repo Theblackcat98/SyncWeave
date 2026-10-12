@@ -92,6 +92,8 @@ export interface AppState {
   selectedConsentFile: number
   consentScrollOffset: number
   receiveDestinationIndex: number
+  /** Non-null while the user is typing a new destination path (issue #27). */
+  destinationInput: string | null
   transferQueue: TransferRecord[]
   activeTransferId: string | null
   reducedMotion: boolean

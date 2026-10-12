@@ -9,20 +9,20 @@ import { appendFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-let logPath: string | null = null
-let logDisabled = false
+let stateDir: string | null = null
+let stateDisabled = false
 
-function resolveLogPath(): string | null {
-  if (logPath) return logPath
-  if (logDisabled) return null
+/** Resolve (creating) the state dir. Exported for destinations.json. */
+export function resolveStateDir(): string | null {
+  if (stateDir) return stateDir
+  if (stateDisabled) return null
   try {
     const base = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "share")
-    const dir = join(base, "syncweave")
-    mkdirSync(dir, { recursive: true })
-    logPath = join(dir, "syncweave.log")
-    return logPath
+    stateDir = join(base, "syncweave")
+    mkdirSync(stateDir, { recursive: true })
+    return stateDir
   } catch {
-    logDisabled = true
+    stateDisabled = true
     return null
   }
 }
@@ -30,10 +30,10 @@ function resolveLogPath(): string | null {
 /** Append a timestamped line to the diagnostic log. Never throws. */
 export function logEvent(event: string, detail?: string): void {
   try {
-    const path = resolveLogPath()
-    if (!path) return
+    const dir = resolveStateDir()
+    if (!dir) return
     const ts = new Date().toISOString()
-    appendFileSync(path, `${ts} ${event}${detail ? ` ${detail}` : ""}\n`)
+    appendFileSync(join(dir, "syncweave.log"), `${ts} ${event}${detail ? ` ${detail}` : ""}\n`)
   } catch {
     // Logging is best effort.
   }
@@ -41,6 +41,6 @@ export function logEvent(event: string, detail?: string): void {
 
 /** For tests: reset the cached path. */
 export function resetLogPathForTests(): void {
-  logPath = null
-  logDisabled = false
+  stateDir = null
+  stateDisabled = false
 }

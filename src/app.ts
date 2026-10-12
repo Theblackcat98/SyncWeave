@@ -9,6 +9,13 @@ import { receiveFiles, sendFiles, TransferDeclinedError, PeerCancelledError, Sen
 import { friendlyErrorMessage } from "./services/friendly-errors.js"
 import type { DiscoveryService, DiscoveredPeer } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
+import {
+  addDestination,
+  cycleDestinationIndex,
+  removeDestination,
+  saveDestinations,
+  validateDestinationPath,
+} from "./services/destinations.js"
 type NoiseListener = Awaited<ReturnType<typeof listenNoise>>
 import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
 import { clamp, stepCursor } from "./cursor.js"
@@ -42,7 +49,7 @@ export interface AppDependencies {
   filesystem: FileSystemService
   peerService: PeerService
   transferService: TransferService
-  receiveDestinations: readonly [string, ...string[]]
+  receiveDestinations: readonly string[]
   reducedMotion?: boolean
   /**
    * "mock" (default) renders the deterministic simulation. "real" swaps the
@@ -67,7 +74,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   // pane has no filesystem (the receiver's files are out of scope).
   const filesystem: FileSystemService =
     mode === "real" ? new RealFileSystemService() : dependencies.filesystem
-  const { peerService, transferService, receiveDestinations } = dependencies
+  const { peerService, transferService } = dependencies
+  // Mutable working copy: add/remove destinations (issue #27) mutate this;
+  // the persisted file is the source of truth across restarts.
+  let receiveDestinations: string[] = [...dependencies.receiveDestinations]
   // In real mode the peer list is populated from UDP-multicast discovery
   // (plus manual entries); in mock mode it comes from the mock service.
   let peers: MockPeer[] = mode === "real" ? [] : peerService.discover()
@@ -597,7 +607,31 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         if (file) file.renamed = !file.renamed
         render(); return
       }
-      case "cycle-destination": state.receiveDestinationIndex = (state.receiveDestinationIndex + 1) % receiveDestinations.length; render(); return
+      case "cycle-destination": {
+        state.receiveDestinationIndex = cycleDestinationIndex(state.receiveDestinationIndex, receiveDestinations.length)
+        const active = receiveDestinations[state.receiveDestinationIndex]!
+        state.status = `Destination: ${active} (${state.receiveDestinationIndex + 1}/${receiveDestinations.length})`
+        render(); return
+      }
+      case "destination-add": {
+        state.destinationInput = ""
+        state.status = "Add destination — type a path (created if missing), Enter to save, Esc to cancel"
+        render(); return
+      }
+      case "destination-remove": {
+        const index = state.receiveDestinationIndex % Math.max(1, receiveDestinations.length)
+        const { dests, removed, reason } = removeDestination(receiveDestinations, index)
+        if (!removed) {
+          state.status = reason ?? "Cannot remove destination"
+          render(); return
+        }
+        receiveDestinations = dests
+        state.receiveDestinationIndex = Math.min(index, receiveDestinations.length - 1)
+        if (mode === "real") saveDestinations(receiveDestinations)
+        logEvent("destination-remove", removed)
+        state.status = `Removed destination: ${removed}`
+        render(); return
+      }
       case "consent-all": acceptConsent(true); return
       case "consent-accept": acceptConsent(false); return
       case "consent-decline": declineConsent(); return
@@ -716,6 +750,8 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if (name === "space") { command("toggle-consent"); return }
     if (name === "r") { command("rename-consent"); return }
     if (name === "d") { command("cycle-destination"); return }
+    if (name === "+" || name === "=") { command("destination-add"); return }
+    if (name === "-" || name === "_") { command("destination-remove"); return }
     // In real mode a parked onTransferRequest promise is waiting on the
     // consent bridge — route through command() so it resolves. Calling the
     // mock accept/decline directly would orphan the promise and wedge the
@@ -740,6 +776,48 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     if ((name === "return" || name === "enter" || name === "escape") && active && active.status !== "queued" && active.status !== "transferring") { returnFromTransfer(); return }
   }
 
+  /** Inline path input for destination-add (issue #27). No modal widget exists
+   *  in this TUI, so typed characters accumulate in state.destinationInput and
+   *  the hint bar shows the buffer. Enter validates and saves; Esc cancels. */
+  function handleDestinationInputKey(key: KeyEvent): void {
+    const name = key.name.toLowerCase()
+    if (name === "return" || name === "enter") {
+      const raw = state.destinationInput ?? ""
+      const validated = validateDestinationPath(raw)
+      if (!validated.ok) {
+        state.status = `Invalid destination: ${validated.reason} — fix it or press Esc`
+        render(); return
+      }
+      const already = receiveDestinations.includes(validated.dir)
+      receiveDestinations = addDestination(receiveDestinations, validated.dir)
+      state.receiveDestinationIndex = receiveDestinations.indexOf(validated.dir)
+      state.destinationInput = null
+      if (mode === "real") saveDestinations(receiveDestinations)
+      logEvent("destination-add", validated.dir)
+      state.status = already
+        ? `Destination already listed: ${validated.dir}`
+        : `Added destination: ${validated.dir} (${state.receiveDestinationIndex + 1}/${receiveDestinations.length})`
+      render(); return
+    }
+    if (name === "escape") {
+      state.destinationInput = null
+      state.status = "Add destination cancelled"
+      render(); return
+    }
+    if (name === "backspace") {
+      state.destinationInput = (state.destinationInput ?? "").slice(0, -1)
+      state.status = `New destination: ${state.destinationInput}▌`
+      render(); return
+    }
+    // Printable character: OpenTUI puts the typed char in key.sequence.
+    const seq = key.sequence
+    if (typeof seq === "string" && seq.length === 1 && seq >= " " && seq !== "\x7f") {
+      state.destinationInput = (state.destinationInput ?? "") + seq
+      state.status = `New destination: ${state.destinationInput}▌`
+      render(); return
+    }
+  }
+
   function handleKey(key: KeyEvent): void {
     if (key.ctrl && key.name.toLowerCase() === "c") {
       dispose()
@@ -747,6 +825,8 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       return
     }
     if (key.ctrl || key.meta || key.option) return
+    // Destination-add input mode captures all keys until Enter/Esc.
+    if (state.destinationInput !== null) { handleDestinationInputKey(key); return }
     const name = key.name.toLowerCase()
     switch (state.screen) {
       case "workspace": handleWorkspaceKey(key); return
@@ -875,14 +955,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
               // No out-of-band expected ID: the consent screen shows the
               // verified Peer ID and SAS, and the user's accept is the
               // confirmation. Identity is fresh per session (P1-13).
-              destinationDirectory: real.receiveDirectory,
+              // Resolved per file: the user picks the destination on the
+              // consent screen ([D]/[+]/[-]) before accepting (issue #27).
+              destinationDirectory: () => receiveDestinations[state.receiveDestinationIndex % Math.max(1, receiveDestinations.length)]!,
               onTransferRequest: pendingConsent,
               onProgress: (fileIndex: number, fileName: string, bytesReceived: number, fileBytes: number) => {
                 state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
                 render()
               },
             })
-            state.status = `Received ${received.files.length} file(s) → ${real.receiveDirectory}`
+            const landedDir = received.files[0]?.path ? received.files[0].path.slice(0, received.files[0].path.lastIndexOf("/")) : real.receiveDirectory
+            state.status = `Received ${received.files.length} file(s) → ${landedDir}`
             logEvent("transfer-complete", `received ${received.files.length} file(s) from ${received.verifiedPeerId.slice(0, 12)}`)
             // Record the real incoming transfer in the queue.
             state.transferQueue = [{
