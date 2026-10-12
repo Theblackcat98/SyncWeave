@@ -1,8 +1,10 @@
+#!/usr/bin/env bun
 import { createCliRenderer } from "@opentui/core"
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { createSyncWeaveApp, type RealTransport } from "./app.js"
+import { parseArgs } from "./cli-args.js"
 import { logEvent } from "./services/diagnostic-log.js"
 import { MockFileSystemService } from "./services/mock-filesystem.js"
 import { MockPeerService } from "./services/mock-peer-service.js"
@@ -21,7 +23,17 @@ function fatal(message: string): never {
   process.exit(1)
 }
 
-if (args.includes("--help") || args.includes("-h")) {
+let cli: ReturnType<typeof parseArgs>
+try {
+  cli = parseArgs(args, process.env)
+} catch (error) {
+  fatal(error instanceof Error ? error.message : String(error))
+}
+for (const warning of cli.warnings) {
+  process.stderr.write(`syncweave: ${warning}\n`)
+}
+
+if (cli.showHelp) {
   process.stdout.write(`SyncWeave ${pkg.version} — TUI file transfer for the local network.
 
 Usage:
@@ -48,79 +60,12 @@ Two instances on one machine need distinct ports:
   process.exit(0)
 }
 
-if (args.includes("--version")) {
+if (cli.showVersion) {
   process.stdout.write(`SyncWeave ${pkg.version}\n`)
   process.exit(0)
 }
 
-// Strict flag parsing: reject unknown --flags and flag values that look
-// like flags (catches typos and misordered arguments).
-const KNOWN_FLAGS = new Set(["--real", "--alias", "--port", "--peer", "--bind", "--help", "-h", "--version"])
-const FLAGS_WITH_VALUE = new Set(["--alias", "--port", "--peer", "--bind"])
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i]
-  if (!arg.startsWith("--") || arg === "--") continue
-  const name = arg.split("=")[0]
-  if (!KNOWN_FLAGS.has(name)) {
-    fatal(`unknown flag "${arg}". Run with --help for usage.`)
-  }
-  if (FLAGS_WITH_VALUE.has(name)) {
-    const inline = arg.includes("=")
-    const next = args[i + 1]
-    if (!inline && (!next || next.startsWith("--"))) {
-      fatal(`flag "${name}" requires a value. Run with --help for usage.`)
-    }
-  }
-}
-
-const realMode = args.includes("--real") || process.env.SYNCWEAVE_MODE === "real"
-const aliasArg = args.indexOf("--alias")
-const alias =
-  aliasArg >= 0 && args[aliasArg + 1] ? args[aliasArg + 1] : (process.env.USER ?? "syncweave")
-const portArg = args.indexOf("--port")
-const tcpPortRaw = portArg >= 0 && args[portArg + 1] ? args[portArg + 1] : "24816"
-const tcpPort = parseInt(tcpPortRaw, 10)
-if (!Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535) {
-  fatal(`invalid --port value "${tcpPortRaw}": expected an integer 1-65535.`)
-}
-// Bind address: default :: (dual-stack IPv4/IPv6). Use 127.0.0.1 or ::1 to
-// keep the listener off the LAN.
-const bindArg = args.indexOf("--bind")
-const bindAddr = bindArg >= 0 && args[bindArg + 1] ? args[bindArg + 1] : "::"
-// Manual peers: --peer 192.168.1.5:24816 (repeatable; IPv6 as [::1]:24816).
-// Fallback when multicast discovery is unavailable; also useful for loopback testing.
-const manualPeers: Array<{ host: string; port: number }> = []
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--peer" && args[i + 1]) {
-    const spec = args[i + 1]
-    // Bracketed IPv6: [::1] or [::1]:24816. Otherwise split on the last colon
-    // so bare IPv6 without brackets is rejected rather than misparsed.
-    let host: string | undefined
-    let portStr: string | undefined
-    const bracketed = spec.match(/^\[([^\]]+)\](?::(\d+))?$/)
-    if (bracketed) {
-      host = bracketed[1]
-      portStr = bracketed[2]
-    } else if ((spec.match(/:/g) ?? []).length > 1) {
-      process.stderr.write(`syncweave: invalid --peer value "${spec}": wrap IPv6 addresses in brackets, e.g. --peer [::1]:24816. Skipping.\n`)
-      continue
-    } else {
-      const idx = spec.lastIndexOf(":")
-      if (idx >= 0) {
-        host = spec.slice(0, idx)
-        portStr = spec.slice(idx + 1)
-      } else {
-        host = spec
-      }
-    }
-    const port = portStr ? parseInt(portStr, 10) : 24816
-    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
-      process.stderr.write(`syncweave: invalid --peer value "${spec}": expected host[:port] with port 1-65535. Skipping.\n`)
-      continue
-    }
-    manualPeers.push({ host, port })
-  }
-}
+const { realMode, alias, tcpPort, bindAddr, manualPeers } = cli
 
 if (!realMode) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
