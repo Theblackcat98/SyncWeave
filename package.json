@@ -8,7 +8,7 @@
   "description": "TUI file transfer for the local network — Noise-encrypted, with UDP-multicast peer discovery.",
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
-    "@types/bun": "1.4.3",
+    "@types/bun": "1.4.4",
     "typescript": "5.8.3"
   },
   "engines": {
