@@ -3,7 +3,7 @@
     "syncweave": "./src/main.ts"
   },
   "dependencies": {
-    "@opentui/core": "0.6.0"
+    "@opentui/core": "0.6.7"
   },
   "description": "TUI file transfer for the local network — Noise-encrypted, with UDP-multicast peer discovery.",
   "devDependencies": {
