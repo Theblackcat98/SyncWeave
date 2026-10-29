@@ -31,7 +31,8 @@ async function floodUntil(channel: NoiseChannel, ms: number): Promise<void> {
   const deadline = Date.now() + ms
   while (Date.now() < deadline && !channel.isClosed) {
     try {
-      await channel.send(payload)
+      const wait = new Promise<void>((r) => setTimeout(r, Math.max(0, deadline - Date.now())))
+      await Promise.race([channel.send(payload), wait])
     } catch {
       return
     }
