@@ -316,6 +316,8 @@ test("R12: a receiver ERROR while the sender is streaming ends the send with the
       await peer.expect(FrameType.FileChunk)
       // The disk fills up after one chunk: say so, then stop reading.
       await peer.sendJson(FrameType.Error, { code: "E_NOSPC", reason: "simulated disk full" }, sid)
+      // Give the socket a moment to actually send the frame before killing it
+      await new Promise(r => setTimeout(r, 10))
       hs.channel.close()
     })().catch(() => undefined)
 
