@@ -12,7 +12,7 @@ import {
 /**
  * Noise_XX_25519_AESGCM_SHA256, implemented on node:crypto.
  *
- * Rationale (see docs/decisions.md): Bun's node:crypto provides
+ * Rationale (see docs/STATE_OF_TRUTH.md): Bun's node:crypto provides
  * hardware-backed AES-256-GCM but no ChaCha20-Poly1305, so the AES-GCM
  * Noise suite is used instead of the ChaChaPoly one. This is a standard
  * Noise protocol name ("Noise_XX_25519_AESGCM_SHA256"). The implementation

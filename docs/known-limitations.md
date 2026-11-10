@@ -2,20 +2,19 @@
 
 What does not work yet, or is not verified, as of the 0.1.0 remediation round
 (2026-10-12). Each item says what to expect. Items marked *open* are tracked in
-[remediation-verification.md](remediation-verification.md) or in
-[decisions.md](decisions.md). Nothing here is hidden behind a feature flag.
+[STATE_OF_TRUTH.md](STATE_OF_TRUTH.md). Nothing here is hidden behind a feature flag.
 
 ## Transfers
 
 - **No retry and no resume.** A failed or cancelled transfer is not retried.
   Send it again from the beginning. The UI says so. The 2026-10-11 record planned up to
-  3 retries; that is deferred ([decisions.md](decisions.md) section 3). *Deferred.*
+  3 retries; that is deferred ([STATE_OF_TRUTH.md](STATE_OF_TRUTH.md), budgets table). *Deferred.*
 - **Name collision during a transfer.** A collision is renamed when the transfer
   starts. If another file takes the chosen name while the transfer is in progress,
-  the transfer fails. It is not retried with a new name. *Open* (decisions.md section 4).
+  the transfer fails. It is not retried with a new name. *Open* (STATE_OF_TRUTH.md, destination policy; being closed by the reset plan).
 - **Sender concurrency is not capped.** The receiver handles one session at a time.
   A sender can start several sessions at once. *Deviation*, recorded in
-  decisions.md section 3.
+  STATE_OF_TRUTH.md (budgets table).
 - **Startup cleanup covers only some folders.** The startup sweep looks at the
   folders SyncWeave knows about. A partial left in another folder (for example, one
   you chose before a crash and then removed from the list) stays until you delete it.

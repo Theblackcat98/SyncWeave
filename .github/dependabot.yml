@@ -4,7 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    # Covers @opentui/core (pre-1.0; see docs/decisions.md section 6) and the dev tools.
+    # Covers @opentui/core (pre-1.0; see docs/STATE_OF_TRUTH.md, tooling policy) and the dev tools.
     commit-message:
       prefix: "chore"
   - package-ecosystem: "github-actions"

@@ -597,7 +597,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function beginTransferRetry(id: string): void {
     stopProgress()
     // Real mode: re-stage the failed transfer's files and re-open review.
-    // Fresh session, fresh consent, restart from zero (per decisions.md).
+    // Fresh session, fresh consent, restart from zero (per STATE_OF_TRUTH.md).
     if (mode === "real") {
       const record = state.transferQueue.find((r) => r.id === id)
       if (!record || (record.status !== "failed" && record.status !== "cancelled")) {
