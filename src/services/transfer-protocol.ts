@@ -862,7 +862,7 @@ function jsonBytes(value: unknown): Uint8Array {
 function receiveErrorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code
   if (code === "ENOSPC") return "E_NOSPC"
-  // The name was taken between resolveDestination and the sink's link (P1-20).
+  // The name stayed taken through every re-resolved publish attempt (P1-20).
   if (code === "EEXIST") return "E_EXISTS"
   const message = error instanceof Error ? error.message : String(error)
   if (/sha-256|digest/i.test(message)) return "E_HASH_MISMATCH"
@@ -1583,6 +1583,10 @@ export async function receiveFiles(options: ReceiveOptions): Promise<ReceiveResu
         const result = await receiveToFile(chunks(), {
           destinationDirectory: destDir(),
           peerFileName: destinationName,
+          // If the resolved name is taken while streaming, the sink
+          // re-resolves against the original peer name (yielding the next
+          // collision index) and retries the publish (P1-20).
+          resolveName: () => resolveDestination(destDir(), file.name),
           maxBytes: BUDGET_MAX_FILE_BYTES,
           maxNameBytes: APP_MAX_NAME_BYTES,
           expectedBytes: file.bytes,

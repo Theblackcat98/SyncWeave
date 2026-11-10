@@ -12,7 +12,8 @@ What does not work yet, or is not verified, as of the 0.1.0 remediation round
   3 retries; that is deferred ([decisions.md](decisions.md) section 3). *Deferred.*
 - **Name collision during a transfer.** A collision is renamed when the transfer
   starts. If another file takes the chosen name while the transfer is in progress,
-  the transfer fails. It is not retried with a new name. *Open* (decisions.md section 4).
+  the name is re-resolved and publication is retried under the next collision
+  name. The file fails only if the name is still being taken after ten attempts.
 - **Sender concurrency is not capped.** The receiver handles one session at a time.
   A sender can start several sessions at once. *Deviation*, recorded in
   decisions.md section 3.

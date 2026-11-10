@@ -24,6 +24,15 @@ export interface SafeReceiveOptions {
   expectedSha256: string
   /** Cancellation signal for this individual receive. */
   signal?: AbortSignal
+  /**
+   * Optional collision resolver. Called with the peer-provided name when
+   * publishing fails because the chosen name was taken after it was resolved
+   * (by another receive or process); it must return a currently-free leaf
+   * name in the same destination. The verified temporary file is then
+   * published under that name instead of failing the receive. Without a
+   * resolver, a taken name fails the receive with EEXIST.
+   */
+  resolveName?: (peerFileName: string) => Promise<string>
 }
 
 export interface SafeReceiveResult {
@@ -243,11 +252,138 @@ async function writeChunk(handle: FileHandle, chunk: Uint8Array, fileOffset: num
   }
 }
 
+/** Total publish attempts (first try plus re-resolved names) per receive. */
+const maxPublishAttempts = 10
+
+/**
+ * True when `link()` failed because the filesystem does not support hard
+ * links (cross-device, or filesystems such as exFAT/SMB/FUSE that refuse
+ * them), as opposed to a name collision or a real I/O error.
+ */
+function isLinkUnsupported(error: unknown): boolean {
+  const code = errorCode(error)
+  return code === "EXDEV" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EPERM"
+}
+
+const linkSupportByDirectory = new Map<string, Promise<boolean>>()
+
+/**
+ * Probe hard-link support in `directory` once: link a throwaway file to a
+ * second throwaway name and remove both. The probe files live only for the
+ * duration of two syscalls and are removed best-effort; their names are
+ * deliberately not staging-partial names, so a leftover can never be
+ * mistaken for an in-progress receive.
+ */
+async function probeLinkSupport(directory: string): Promise<boolean> {
+  const probeSource = join(directory, `.syncweave-linkprobe-${process.pid}-${randomUUID()}`)
+  const probeTarget = join(directory, `.syncweave-linkprobe-${process.pid}-${randomUUID()}`)
+  try {
+    const handle = await open(probeSource, "wx", 0o600)
+    await handle.close()
+    await link(probeSource, probeTarget)
+    return true
+  } catch (error) {
+    if (isLinkUnsupported(error)) return false
+    throw error
+  } finally {
+    await unlink(probeSource).catch(() => undefined)
+    await unlink(probeTarget).catch(() => undefined)
+  }
+}
+
+/** Whether hard links work in `directory`, probed at most once per process. */
+function linkSupported(directory: string): Promise<boolean> {
+  let probe = linkSupportByDirectory.get(directory)
+  if (!probe) {
+    probe = probeLinkSupport(directory)
+    linkSupportByDirectory.set(directory, probe)
+    // A probe that failed for an unexpected reason (not "unsupported") must
+    // not poison the destination for the rest of the process.
+    probe.catch(() => {
+      if (linkSupportByDirectory.get(directory) === probe) linkSupportByDirectory.delete(directory)
+    })
+  }
+  return probe
+}
+
+/**
+ * Publish on a filesystem without hard links: create the final name
+ * exclusively and copy the verified temporary bytes into it. `wx`
+ * (O_CREAT|O_EXCL) refuses an existing name and, on POSIX, a symlink at
+ * that path, so the copy can never overwrite or write through a link. If
+ * the copy fails, the exclusively-created incomplete file is removed
+ * again — it never held anyone else's data.
+ */
+async function publishExclusiveCopy(temporaryPath: string, finalPath: string, expectedBytes: number): Promise<void> {
+  const finalHandle = await open(finalPath, "wx", 0o600)
+  let completed = false
+  try {
+    const temporaryHandle = await open(temporaryPath, "r")
+    try {
+      const buffer = Buffer.alloc(128 * 1024)
+      let offset = 0
+      while (offset < expectedBytes) {
+        const { bytesRead } = await temporaryHandle.read(
+          buffer,
+          0,
+          Math.min(buffer.length, expectedBytes - offset),
+          offset,
+        )
+        if (bytesRead <= 0) {
+          throw new ReceiveIntegrityError("Temporary file ended before the verified byte count during publish")
+        }
+        let written = 0
+        while (written < bytesRead) {
+          const result = await finalHandle.write(buffer, written, bytesRead - written, offset + written)
+          if (result.bytesWritten <= 0) throw new Error("Published file stopped accepting bytes")
+          written += result.bytesWritten
+        }
+        offset += bytesRead
+      }
+    } finally {
+      await temporaryHandle.close()
+    }
+    await finalHandle.sync()
+    completed = true
+  } finally {
+    await finalHandle.close().catch(() => undefined)
+    if (!completed) await unlink(finalPath).catch(() => undefined)
+  }
+}
+
+/**
+ * Publish the verified temporary file under `finalPath`: an atomic hard
+ * link where the destination supports links, the exclusive-create copy
+ * where it does not. A hard link that unexpectedly reports "unsupported"
+ * (the probe raced a filesystem change) downgrades the destination to the
+ * copy path for the rest of the process.
+ */
+async function publishVerifiedFile(
+  directory: string,
+  temporaryPath: string,
+  finalPath: string,
+  expectedBytes: number,
+): Promise<void> {
+  if (await linkSupported(directory)) {
+    try {
+      await link(temporaryPath, finalPath)
+      return
+    } catch (error) {
+      if (!isLinkUnsupported(error)) throw error
+      linkSupportByDirectory.set(directory, Promise.resolve(false))
+    }
+  }
+  await publishExclusiveCopy(temporaryPath, finalPath, expectedBytes)
+}
+
 /**
  * Stream into an exclusive same-directory temporary file, verify the caller's
- * expected size and SHA-256, then publish via an atomic hard link. Hard-link
- * creation does not replace an existing destination; unsupported filesystems
- * fail closed (there is deliberately no rename/overwrite fallback).
+ * expected size and SHA-256, then publish without ever replacing an existing
+ * destination: an atomic hard link where the filesystem supports links
+ * (probed once per destination), otherwise an exclusive-create copy of the
+ * verified bytes. When the caller supplies `resolveName`, a destination name
+ * taken between resolution and publication is retried under the resolver's
+ * next free name instead of failing the receive.
  */
 export async function receiveToFile(
   source: AsyncIterable<Uint8Array>,
@@ -270,12 +406,12 @@ export async function receiveToFile(
   }
 
   throwIfCancelled(options.signal)
-  const name = sanitizePeerBasename(options.peerFileName, options.maxNameBytes)
+  let name = sanitizePeerBasename(options.peerFileName, options.maxNameBytes)
   const directory = await realpath(resolve(options.destinationDirectory))
   if (!(await stat(directory)).isDirectory()) {
     throw new TypeError("destinationDirectory must name an existing directory")
   }
-  const finalPath = join(directory, name)
+  let finalPath = join(directory, name)
   if (dirname(finalPath) !== directory) {
     throw new Error("Sanitized filename escaped the chosen destination directory")
   }
@@ -333,9 +469,27 @@ export async function receiveToFile(
     await handle.close()
     handle = undefined
 
-    // No await separates this check from the publication syscall, so an abort
-    // observed before finalization cannot publish even verified bytes.
-    await link(temporaryPath, finalPath)
+    // An abort observed before finalization must not publish even verified
+    // bytes, so re-check immediately before the publish attempts.
+    throwIfCancelled(options.signal)
+    // Publish the verified temporary file. If the chosen name was taken
+    // while streaming, ask the caller's resolver for the next free name and
+    // publish under it instead of failing the file (P1-20).
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await publishVerifiedFile(directory, temporaryPath, finalPath, bytesReceived)
+        break
+      } catch (error) {
+        if (errorCode(error) !== "EEXIST" || !options.resolveName || attempt >= maxPublishAttempts) {
+          throw error
+        }
+        name = sanitizePeerBasename(await options.resolveName(options.peerFileName), options.maxNameBytes)
+        finalPath = join(directory, name)
+        if (dirname(finalPath) !== directory) {
+          throw new Error("Resolved filename escaped the chosen destination directory")
+        }
+      }
+    }
     // From here on the verified file is at its final name. Nothing below may
     // turn this into a reported failure, and no cleanup may remove the final name.
     published = true
