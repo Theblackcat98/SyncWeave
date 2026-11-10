@@ -19,8 +19,9 @@ import { friendlyErrorMessage } from "./services/friendly-errors.js"
 import type { DiscoveryService } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
 import { addDestination, cycleDestinationIndex, removeDestination, saveDestinations, validateDestinationPath } from "./services/destinations.js"
-import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
+import { createInitialAppState } from "./state/app-state.js"
 import { clamp, stepCursor } from "./cursor.js"
+import { viewportOf, visiblePaneRows } from "./ui/layout.js"
 import { syncDiscoveredPeers } from "./peer-sync.js"
 import { motion } from "./theme.js"
 import { AnimationClock } from "./ui/animation-clock.js"
@@ -199,7 +200,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       : peers[state.peerIndex % Math.max(1, peers.length)]
   const currentEntries = (pane = state.activePane) => filesystem.list(pane, state.paths[pane])
   const stagedEntries = (pane = state.activePane) => currentEntries(pane).filter((entry) => state.staged[pane].has(entry.id))
-  const visibleRows = () => visibleRowCount(renderer.terminalHeight || 24)
+  // One layout source for app and renderer alike (P2-17): the app's cursor
+  // bookkeeping must agree with the rows the renderer actually draws.
+  const visibleRows = () => visiblePaneRows(viewportOf(renderer.terminalWidth || 80, renderer.terminalHeight || 24))
 
   function render(): void {
     if (disposed) return
@@ -225,9 +228,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           render()
         },
         scrollPane(pane, direction) {
+          // The wheel scrolls the viewport (~3 rows per tick), not the
+          // cursor (P2-14); the cursor is only clamped back into view.
           state.activePane = pane
-          state.cursors[pane] = stepCursor(state.cursors[pane], direction === "down" ? 1 : -1, currentEntries(pane).length)
-          keepCursorVisible(pane)
+          const entries = currentEntries(pane)
+          const rows = visibleRows()
+          const maxOffset = Math.max(0, entries.length - rows)
+          const next = clamp(state.scrollOffsets[pane] + (direction === "down" ? 3 : -3), 0, maxOffset)
+          state.scrollOffsets[pane] = next
+          if (state.cursors[pane] < next) state.cursors[pane] = next
+          if (state.cursors[pane] >= next + rows) state.cursors[pane] = next + rows - 1
+          state.cursors[pane] = clamp(state.cursors[pane], 0, Math.max(0, entries.length - 1))
           animateFocus()
           render()
         },
@@ -1024,6 +1035,30 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
   }
 
+  // Transfer progress arrives per 64 KiB chunk; a full tree rebuild per chunk
+  // is the P2-4 render cost. Progress renders are throttled to ~10 Hz with a
+  // trailing flush, so the final progress state always lands. Completion and
+  // status renders elsewhere stay unthrottled.
+  const PROGRESS_RENDER_INTERVAL_MS = 100
+  let lastProgressRenderAt = 0
+  let progressRenderTimer: ReturnType<typeof setTimeout> | null = null
+  function renderProgress(): void {
+    const now = Date.now()
+    const elapsed = now - lastProgressRenderAt
+    if (elapsed >= PROGRESS_RENDER_INTERVAL_MS) {
+      lastProgressRenderAt = now
+      renderSafely()
+      return
+    }
+    if (progressRenderTimer === null) {
+      progressRenderTimer = setTimeout(() => {
+        progressRenderTimer = null
+        lastProgressRenderAt = Date.now()
+        renderSafely()
+      }, PROGRESS_RENDER_INTERVAL_MS - elapsed)
+    }
+  }
+
   /** Remove the parked consent prompt and unpark its session with a decline. */
   function dropParkedConsent(): void {
     const parked = realConsent
@@ -1177,7 +1212,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         signal: session.aborter.signal,
         onProgress: (_index, fileName, bytesReceived, fileBytes) => {
           state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
-          renderSafely()
+          renderProgress()
         },
       })
       const landed = received.files[0] ? dirname(received.files[0].path) : session.destination ?? real.receiveDirectory
@@ -1449,7 +1484,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           const pct = Math.round((bytesSent / Math.max(1, fileBytes)) * 100)
           state.status = `Sending ${fileName} (${fileIndex + 1}/${fileList.length}) · ${pct}%`
           record.progress = Math.round(((fileIndex + pct / 100) / fileList.length) * 100)
-          renderSafely()
+          renderProgress()
         },
       })
       // Per-file outcomes: "Sent" is only true when the receiver acked each file (P0-2).
@@ -1516,9 +1551,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     reconcileTimers()
   }
 
+  /** A resize can strand the cursor outside the visible window (P2-13):
+   *  clamp both panes' windows to the cursor before repainting. */
+  function onResize(): void {
+    keepCursorVisible("local")
+    keepCursorVisible("remote")
+    render()
+  }
+
   renderer.useMouse = true
   renderer.keyInput.on("keypress", handleKey)
-  renderer.on(CliRenderEvents.RESIZE, render)
+  renderer.on(CliRenderEvents.RESIZE, onResize)
   renderer.on(CliRenderEvents.BLUR, onBlur)
   renderer.on(CliRenderEvents.FOCUS, onFocus)
 
@@ -1536,6 +1579,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function dispose(): Promise<void> {
     if (disposing) return disposing
     disposed = true
+    if (progressRenderTimer !== null) {
+      clearTimeout(progressRenderTimer)
+      progressRenderTimer = null
+    }
     if (mode === "real" && dependencies.real) {
       // Aborting the listener signal unparks the accept() generator so the
       // receive loop can exit.
@@ -1560,7 +1607,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
     clock.dispose()
     renderer.keyInput.off("keypress", handleKey)
-    renderer.off(CliRenderEvents.RESIZE, render)
+    renderer.off(CliRenderEvents.RESIZE, onResize)
     renderer.off(CliRenderEvents.BLUR, onBlur)
     renderer.off(CliRenderEvents.FOCUS, onFocus)
     disposing = settleWithin(inFlight, DISPOSE_SETTLE_MS)

@@ -40,8 +40,3 @@ export function createInitialAppState(paths: Record<Pane, string>, reducedMotion
     sending: false,
   }
 }
-
-export function visibleRowCount(terminalHeight: number): number {
-  if (terminalHeight <= 14) return 2
-  return Math.max(2, Math.min(14, terminalHeight - 18))
-}
