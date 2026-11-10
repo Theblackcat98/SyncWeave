@@ -452,7 +452,7 @@ export class FrameParser {
    * asks. Callers must only invoke this after `readHeader` returned a header
    * and the session layer has verified the applicable consent gate.
    */
-  async readBody(header: FrameHeader, signal?: AbortSignal): Promise<Uint8Array> {
+  async readBody(header: FrameHeader, signal?: AbortSignal, bodyTimeoutMs?: number | null): Promise<Uint8Array> {
     if (this.protocolState === "closed") {
       throw new FrameRejectedError("Session is closed", this.protocolState)
     }
@@ -465,27 +465,40 @@ export class FrameParser {
     if (header.bodyLength > this.options.maxBodyLength) {
       throw new FrameRejectedError("declared body length exceeds maximum", this.protocolState)
     }
-    const out = new Uint8Array(header.bodyLength)
-    let offset = 0
+    // `bodyTimeoutMs` mirrors readHeader's budget parameter (P1-18): undefined
+    // keeps the parser's own default budget; `null` means no parser-level
+    // budget — the caller owns one deadline per stage (the protocol layer
+    // races the whole frame read against its stage deadline), so no
+    // AbortController, timer or AbortSignal.any is allocated per body.
+    const budgetMs = bodyTimeoutMs === undefined ? (this.options.bodyTimeoutMs ?? 60_000) : bodyTimeoutMs
+    if (budgetMs === null) {
+      return this.readBodyBytes(header, signal)
+    }
     // Bound the whole body read: a sender dribbling bytes forever must not
     // hang the receiver. (Header reads already have their own timeout.)
     // The reason propagates so the user sees *what* timed out.
     const bodyBudget = new AbortController()
     const bodyTimer = setTimeout(() => {
-      bodyBudget.abort(new Error(`frame body timed out after ${(this.options.bodyTimeoutMs ?? 60_000) / 1000}s: sender stalled mid-frame`))
-    }, this.options.bodyTimeoutMs ?? 60_000)
+      bodyBudget.abort(new Error(`frame body timed out after ${budgetMs / 1000}s: sender stalled mid-frame`))
+    }, budgetMs)
     const bodySignal = signal ? AbortSignal.any([signal, bodyBudget.signal]) : bodyBudget.signal
     try {
-      while (offset < header.bodyLength) {
-        const chunk = await this.source.read(header.bodyLength - offset, bodySignal)
-        if (chunk === null || chunk.length === 0) {
-          throw new FrameRejectedError("truncated frame body", this.protocolState)
-        }
-        out.set(chunk.subarray(0, header.bodyLength - offset), offset)
-        offset += Math.min(chunk.length, header.bodyLength - offset)
-      }
+      return await this.readBodyBytes(header, bodySignal)
     } finally {
       clearTimeout(bodyTimer)
+    }
+  }
+
+  private async readBodyBytes(header: FrameHeader, signal: AbortSignal | undefined): Promise<Uint8Array> {
+    const out = new Uint8Array(header.bodyLength)
+    let offset = 0
+    while (offset < header.bodyLength) {
+      const chunk = await this.source.read(header.bodyLength - offset, signal)
+      if (chunk === null || chunk.length === 0) {
+        throw new FrameRejectedError("truncated frame body", this.protocolState)
+      }
+      out.set(chunk.subarray(0, header.bodyLength - offset), offset)
+      offset += Math.min(chunk.length, header.bodyLength - offset)
     }
     this.counters.bodyBytesConsumed += header.bodyLength
     return out

@@ -566,7 +566,9 @@ async function readFrame(
   if (!extSessionId || !equalBytes(extSessionId, sessionId)) {
     throw new Error("frame session id mismatch: not our session")
   }
-  const body = await parser.readBody(header, signal)
+  // Null body budget: FrameInbox owns one deadline per stage for the whole
+  // frame read, so the parser must not allocate a per-body timer (P1-18).
+  const body = await parser.readBody(header, signal, null)
   if (header.type === FrameType.Cancel) {
     const raw: unknown = parseJsonBody(body, "cancel")
     validateSignalBody(raw, "cancel")
