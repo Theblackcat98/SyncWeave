@@ -188,12 +188,11 @@ CI runs lint, typecheck, coverage and `bun audit` on `ubuntu-latest` and `macos-
 ## Documentation
 
 - [docs/networking.md](docs/networking.md): transports, protocol, security properties and firewall notes.
-- [docs/decisions.md](docs/decisions.md): recorded decisions and their status.
+- [docs/STATE_OF_TRUTH.md](docs/STATE_OF_TRUTH.md): the canonical record — what the code does, the decisions in force, and release-gate status.
 - [docs/real-mode-checklist.md](docs/real-mode-checklist.md): manual test steps for real mode.
 - [docs/troubleshooting.md](docs/troubleshooting.md): common failures and what to check.
 - [docs/known-limitations.md](docs/known-limitations.md): what does not work yet.
 - [docs/privacy.md](docs/privacy.md): what is visible on the LAN and what is written to disk.
-- [docs/release-gates.md](docs/release-gates.md): release gates with evidence.
 - [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md).
 - [docs/history/](docs/history/): the Phase 1 and Phase 2 planning documents, archived. They are not current.
 

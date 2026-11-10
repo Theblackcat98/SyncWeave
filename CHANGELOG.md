@@ -6,6 +6,15 @@ All notable changes to SyncWeave. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation truth reset (2026-11-09): `docs/STATE_OF_TRUTH.md` is now the
+  canonical record (reconciliation of the 96-item remediation plan against
+  main, the recorded decisions, and the release gates). `docs/decisions.md`,
+  `docs/release-gates.md`, `docs/remediation-plan-m.md` and
+  `docs/remediation-verification.md` are deleted; their live content is
+  absorbed into the state of truth.
+
 ### Added
 
 - Real-mode flags accept `--flag=value`. Usage errors exit with status 2. `--root`

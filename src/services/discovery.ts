@@ -10,7 +10,7 @@
  * - The `peerId` is the app's session-ephemeral Ed25519 Peer ID
  *   (see peer-id.ts `generateEphemeralIdentity`): generated fresh at app
  *   startup, never persisted. It is therefore random, session-scoped, and
- *   unlinkable across restarts, satisfying the decisions.md privacy
+ *   unlinkable across restarts, satisfying the STATE_OF_TRUTH.md privacy
  *   constraint. It doubles as the peer-list dedup key.
  * - Discovery never authorizes anything: picking a discovered peer only
  *   fills in the dial address. Gate B (out-of-band Peer ID comparison on
