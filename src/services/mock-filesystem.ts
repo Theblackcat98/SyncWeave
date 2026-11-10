@@ -1,9 +1,9 @@
-import type { MockEntry, Pane } from "../domain.js"
+import type { FileEntry, Pane } from "../domain.js"
 import type { FileSystemService } from "./ports.js"
 
-type Tree = Record<Pane, Record<string, MockEntry[]>>
+type Tree = Record<Pane, Record<string, FileEntry[]>>
 
-function entry(id: string, name: string, kind: "file" | "directory", bytes: number, state: MockEntry["state"], summary?: string): MockEntry {
+function entry(id: string, name: string, kind: "file" | "directory", bytes: number, state: FileEntry["state"], summary?: string): FileEntry {
   return { id, name, kind, bytes, state, summary }
 }
 
@@ -95,7 +95,7 @@ export class MockFileSystemService implements FileSystemService {
   readonly paths = rootPath
   private readonly files: Tree = structuredClone(scenario)
 
-  list(pane: Pane, path: string): MockEntry[] {
+  list(pane: Pane, path: string): FileEntry[] {
     return (this.files[pane][path] ?? []).map((item) => ({ ...item }))
   }
 
