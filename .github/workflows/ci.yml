@@ -44,6 +44,13 @@ jobs:
       - name: Test with coverage floors
         # Runs the whole suite, including the headless app smoke test, and fails
         # below the floors in bunfig.toml.
+        # SYNCWEAVE_REQUIRE_MULTICAST is deliberately NOT set here (P2-21):
+        # GitHub-hosted runners have no multicast routing, so the live
+        # multicast test in discovery.test.ts skips itself when the group
+        # cannot be joined. Setting the variable would hard-fail every run
+        # for an environment limitation, not a code regression. The hard-fail
+        # mode is for LAN machines and self-hosted runners where multicast
+        # is expected to work.
         run: bun run test:coverage
 
   release:
