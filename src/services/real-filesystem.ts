@@ -1,6 +1,6 @@
 import { lstatSync, readdirSync, readlinkSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import type { MockEntry, Pane } from "../domain.js"
 import type { FileSystemService } from "./ports.js"
 import { isTemporaryPartialName } from "./safe-receive-sink.js"
@@ -169,6 +169,18 @@ export class RealFileSystemService implements FileSystemService {
       if (entry) entries.push(entry)
     }
     return entries
+  }
+
+  /**
+   * Describe one absolute path as a listing entry, without listing its
+   * folder. Staged entry IDs are absolute paths, so a file staged in
+   * another folder resolves here even when it is not on screen; the send
+   * gather uses this so staging is truly global. Returns null when the
+   * path vanished or cannot be stated.
+   */
+  describe(absolutePath: string): FsEntry | null {
+    const absolute = resolve(expandHome(absolutePath))
+    return describeEntry(absolute, basename(absolute))
   }
 
   parentPath(path: string): string {
