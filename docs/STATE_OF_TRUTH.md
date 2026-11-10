@@ -567,6 +567,17 @@ every ledger row touched by Groups 1–2 re-verified against the new main.
 recorded deviations, P1-55 two-host checklist run and issue #28 (Nick's
 hardware), the local-only appendix work (pushing it stays Nick's call).
 
+## Correction (2026-11-09, post-verification) and cluster C9
+
+The C5 test-gap work proved by run that **P1-37's DONE verdict was too
+generous**. Staging is global (the activity bar counts every staged file),
+but a send gathers only the current folder's staged files: stage in folder
+A and folder B, send from B, and A's file is silently excluded — while the
+checklist's "Staging scope" case documents that the review lists both.
+The verdict's unstage-only-confirmed half is correct; the gather half is
+not. **C9 VERDICT (Nick, 2026-11-09): CODE** — fix the gather to the
+documented intent; the regression test ships with the fix.
+
 ## Appendix — local-only work (named, not judged)
 
 Per the scope decision, these were excluded from verdicts: the P1–P7
