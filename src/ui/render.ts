@@ -1,6 +1,7 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
-import type { AppMode, AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
-import { previewSavedName } from "../services/safe-receive-sink.js"
+import type { AppMode, AppState, ConsentFile, ConsentRequest, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
+import type { FsEntry } from "../services/real-filesystem.js"
+import { previewSavedName, previewSavedNameWithCollisions } from "../services/safe-receive-sink.js"
 import { formatBytes } from "../domain.js"
 import { LIST_PAGE_SIZE, type FileSystemService, type PeerService } from "../services/ports.js"
 import { icons, motion, theme } from "../theme.js"
@@ -40,6 +41,9 @@ export interface RenderData {
   queue: TransferRecord[]
   actions: RenderActions
   real?: { bindAddr: string; tcpPort: number; receiving?: boolean } | null
+  /** Names already present in the selected receive destination, for the
+   *  consent screen's collision-suffix previews (P0-12). */
+  consentTakenNames?: ReadonlySet<string>
 }
 
 interface RenderContext extends RenderData {
@@ -495,7 +499,10 @@ function renderSendReview(parent: BoxRenderable, ctx: RenderContext): void {
   const budget = Math.max(0, cardContentRows(vp) - fixed)
   const showCount = files.length <= budget ? files.length : Math.max(0, budget - 1)
   files.slice(0, showCount).forEach((file, index) => {
-    card.add(label(renderer, `send-file-${index}`, truncate(`  ${icons.check} ${file.name}  ${formatBytes(file.bytes)}`, inner), theme.color.text))
+    // Symlinks are staged but never sent; show where the link points so the
+    // review screen says what the entry actually is (P0-11).
+    const target = (file as FsEntry).symlinkTarget
+    card.add(label(renderer, `send-file-${index}`, truncate(`  ${icons.check} ${file.name}${target ? ` → ${target}` : ""}  ${formatBytes(file.bytes)}`, inner), theme.color.text))
   })
   if (files.length > showCount) card.add(label(renderer, "send-overflow", `  + ${files.length - showCount} more`, theme.color.muted))
   card.add(label(renderer, "send-consent-explainer", truncate(realMode
@@ -574,7 +581,10 @@ function renderConsent(parent: BoxRenderable, ctx: RenderContext): void {
     card.add(label(renderer, "consent-scroll-hint", truncate(`${hint} ${icons.dot} ${acceptedCount}/${request.files.length} accepted`, inner), theme.color.muted))
   }
   const list = panel(renderer, "consent-file-list", { flexDirection: "column", flexGrow: 1, minHeight: 1, marginTop: 1 })
-  request.files.slice(offset, offset + windowSize).forEach((file, i) => list.add(renderConsentFile(ctx, file, offset + i, inner)))
+  // Collision previews must account for every file in the request, not
+  // just the visible window: an earlier duplicate claims the plain name.
+  const savedNames = realMode ? computeConsentSavedNames(ctx, request) : null
+  request.files.slice(offset, offset + windowSize).forEach((file, i) => list.add(renderConsentFile(ctx, file, offset + i, inner, savedNames?.[offset + i])))
   card.add(list)
   const optionButtons = [
     actionButton(renderer, "toggle-selected", optionCaptions[0]!, "toggle-consent", actions.command, { fg: theme.color.warning }),
@@ -595,7 +605,19 @@ function renderConsent(parent: BoxRenderable, ctx: RenderContext): void {
   parent.add(card)
 }
 
-function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number, inner: number): BoxRenderable {
+/** Per-file saved-name previews for the consent screen (P0-12): each file
+ *  claims its previewed name so duplicates inside one request suffix
+ *  against each other as well as against the destination's contents. */
+function computeConsentSavedNames(ctx: RenderContext, request: ConsentRequest): Array<string | null> {
+  const taken = new Set(ctx.consentTakenNames ?? [])
+  return request.files.map((file) => {
+    const saved = previewSavedNameWithCollisions(file.name, taken)
+    if (saved !== null) taken.add(saved)
+    return saved
+  })
+}
+
+function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number, inner: number, precomputedSaved?: string | null): BoxRenderable {
   const { renderer, state, actions, mode } = ctx
   const selected = state.selectedConsentFile === index
   const row = panel(renderer, `consent-file-${index}`, {
@@ -612,8 +634,9 @@ function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number,
   let name = file.renamed && mode !== "real" ? renamePreview(file.name) : file.name
   if (mode === "real") {
     // Show what the sink will actually write (P0-12): sanitizing can change
-    // the name, and a rejected name must be visible before accepting.
-    const saved = previewSavedName(file.name)
+    // the name, a collision adds its ` (n)` suffix, and a rejected name
+    // must be visible before accepting.
+    const saved = precomputedSaved !== undefined ? precomputedSaved : previewSavedName(file.name)
     if (saved === null) name = `${file.name} (name will be rejected)`
     else if (saved !== file.name) name = `${file.name} → saved as ${saved}`
   }

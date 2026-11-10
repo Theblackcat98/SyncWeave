@@ -19,6 +19,7 @@ import { friendlyErrorMessage } from "./services/friendly-errors.js"
 import type { DiscoveryService } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
 import { addDestination, cycleDestinationIndex, removeDestination, saveDestinations, validateDestinationPath } from "./services/destinations.js"
+import { listDestinationNames } from "./services/safe-receive-sink.js"
 import { createInitialAppState } from "./state/app-state.js"
 import { clamp, stepCursor } from "./cursor.js"
 import { viewportOf, visiblePaneRows } from "./ui/layout.js"
@@ -180,6 +181,23 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   let receiving = true
   let activeListener: NoiseListener | null = null
   let restartReceiveLoop: (() => void) | null = null
+  // Names present in the selected receive destination, for the consent
+  // screen's collision-suffix previews (P0-12). Refreshed when the selected
+  // destination changes; the preview is advisory — the sink re-resolves
+  // against the live directory at save time.
+  let consentTakenNames: ReadonlySet<string> = new Set()
+  let consentTakenDir: string | null = null
+  function refreshConsentTakenNames(): void {
+    if (mode !== "real") return
+    const dir = receiveDestinations[state.receiveDestinationIndex % Math.max(1, receiveDestinations.length)]
+    if (!dir || dir === consentTakenDir) return
+    consentTakenDir = dir
+    void listDestinationNames(dir).then((names) => {
+      if (disposed || consentTakenDir !== dir) return
+      consentTakenNames = names
+      if (state.screen === "consent") renderSafely()
+    })
+  }
   /** Every real send/receive task; dispose() waits for these to settle. */
   const inFlight = new Set<Promise<unknown>>()
   let disposing: Promise<void> | null = null
@@ -216,6 +234,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function render(): void {
     if (disposed) return
     syncQueue()
+    refreshConsentTakenNames()
     renderApp({
       renderer,
       state,
@@ -226,6 +245,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       favorites: peerService.favorites(),
       queue: state.transferQueue,
       real: mode === "real" && dependencies.real ? { bindAddr: dependencies.real.bindAddr, tcpPort: dependencies.real.tcpPort, receiving } : null,
+      consentTakenNames,
       actions: {
         command,
         selectEntry(pane, index) {

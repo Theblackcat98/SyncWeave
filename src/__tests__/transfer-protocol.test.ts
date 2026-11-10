@@ -363,6 +363,12 @@ test("validation: malformed protocol JSON fails closed", () => {
   expect(() => validateProtocolFiles("nope", "t")).toThrow(/not an array/)
   expect(() => validateProtocolFiles([null], "t")).toThrow(/not an object/)
   expect(() => validateProtocolFiles([{ ...goodFile(), name: "" }], "t")).toThrow(/bad file name/)
+  // The full Unicode Cf category is rejected (P0-12), matching the sink
+  // sanitizer — including members the old hand-listed ranges missed:
+  // U+2060 WORD JOINER and U+061C ARABIC LETTER MARK.
+  expect(() => validateProtocolFiles([{ ...goodFile(), name: "a\u2060b.txt" }], "t")).toThrow(/control or format/)
+  expect(() => validateProtocolFiles([{ ...goodFile(), name: "a\u061cb.txt" }], "t")).toThrow(/control or format/)
+  expect(() => validateProtocolFiles([{ ...goodFile(), name: "a\u202eb.txt" }], "t")).toThrow(/control or format/)
   expect(() => validateProtocolFiles([{ ...goodFile(), sha256: "zzz" }], "t")).toThrow(/bad sha256/)
   expect(() => validateProtocolFiles([{ ...goodFile(), sha256: "A".repeat(64) }], "t")).toThrow(/bad sha256/)
   expect(() => validateIdentityProofBody({})).toThrow(/bad version/)
