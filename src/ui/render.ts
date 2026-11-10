@@ -1,4 +1,5 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
+import pkg from "../../package.json" with { type: "json" }
 import type { AppMode, AppState, ConsentFile, ConsentRequest, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
 import type { FsEntry } from "../services/real-filesystem.js"
 import { previewSavedName, previewSavedNameWithCollisions } from "../services/safe-receive-sink.js"
@@ -134,7 +135,7 @@ function renderHeader(ctx: RenderContext): BoxRenderable {
   })
   const inner = headerInnerWidth(vp)
   const realMode = mode === "real"
-  const brand = truncate(`${icons.mark} SyncWeave 0.1.0`, inner)
+  const brand = truncate(`${icons.mark} SyncWeave ${pkg.version}`, inner)
   header.add(label(renderer, "brand", brand, theme.typography.brand))
 
   const frame = icons.discoveryFrames[state.discoveryFrame % icons.discoveryFrames.length]

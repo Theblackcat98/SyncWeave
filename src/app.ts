@@ -90,6 +90,8 @@ export interface RealTransport {
   discovery: DiscoveryService
   alias: string
   tcpPort: number
+  /** UDP discovery port override (--discovery-port); undefined = service default. */
+  discoveryPort?: number
   /** Directory where received files are written. */
   receiveDirectory: string
   /** Aborts the listener accept loop; aborted on app dispose. */
@@ -1356,6 +1358,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         alias: real.alias,
         peerId: real.announcedPeerId,
         tcpPort: real.tcpPort,
+        discoveryPort: real.discoveryPort,
         events: {
           onError: (error: Error) => {
             state.status = `Discovery: ${error.message}`
