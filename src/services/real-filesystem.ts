@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, readlinkSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import type { MockEntry, Pane } from "../domain.js"
+import type { FileEntry, Pane } from "../domain.js"
 import type { FileSystemService } from "./ports.js"
 import { isTemporaryPartialName } from "./safe-receive-sink.js"
 
@@ -20,7 +20,7 @@ export interface ListOptions {
 }
 
 /** A listing entry. `symlinkTarget` is the unfollowed readlink() value for symlinks. */
-export type FsEntry = MockEntry & { symlinkTarget?: string }
+export type FsEntry = FileEntry & { symlinkTarget?: string }
 
 export interface RealFileSystemOptions {
   /** Show dotfiles (default true). Staging partials are always hidden. */

@@ -8,7 +8,7 @@ export type TransferStatus = "queued" | "transferring" | "complete" | "declined"
 export type EntryKind = "file" | "directory"
 export type ConsentMode = "incoming" | "outgoing"
 
-export interface MockEntry {
+export interface FileEntry {
   id: string
   name: string
   kind: EntryKind
@@ -19,7 +19,7 @@ export interface MockEntry {
   unsupported?: string
 }
 
-export interface MockPeer {
+export interface Peer {
   id: string
   name: string
   host: string
@@ -55,7 +55,7 @@ export interface ConsentFile {
 export interface ConsentRequest {
   id: string
   mode: ConsentMode
-  peer: MockPeer
+  peer: Peer
   files: ConsentFile[]
   createdAt: number
   sourcePane?: Pane

@@ -1,4 +1,4 @@
-import type { MockPeer } from "./domain.js"
+import type { Peer } from "./domain.js"
 import type { DiscoveredPeer } from "./services/discovery.js"
 
 /**
@@ -14,7 +14,7 @@ import type { DiscoveredPeer } from "./services/discovery.js"
  * claim, and aliases from the network are marked as claimed. Peers that
  * share an alias are both flagged so the UI can warn about the collision.
  */
-export function syncDiscoveredPeers(discovered: DiscoveredPeer[]): MockPeer[] {
+export function syncDiscoveredPeers(discovered: DiscoveredPeer[]): Peer[] {
   const seen = new Set<string>()
   const unique = discovered.filter((d) => {
     if (seen.has(d.peerId)) return false
