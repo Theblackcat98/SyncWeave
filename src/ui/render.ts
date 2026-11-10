@@ -39,7 +39,7 @@ export interface RenderData {
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
   actions: RenderActions
-  real?: { bindAddr: string; tcpPort: number } | null
+  real?: { bindAddr: string; tcpPort: number; receiving?: boolean } | null
 }
 
 interface RenderContext extends RenderData {
@@ -151,10 +151,13 @@ function renderHeader(ctx: RenderContext): BoxRenderable {
   // active peer, tagline) until the rest fits; nothing wraps (R13).
   const bind = ctx.real?.bindAddr ?? "::"
   const port = ctx.real?.tcpPort ?? 0
+  const listening = ctx.real?.receiving !== false
   const activePeer = peers[state.peerIndex % Math.max(1, peers.length)]
   const segments = new Map<string, { text: string; fg: string }>([
     ["header-tagline", { text: "  TUI FILE TRANSFER", fg: theme.color.muted }],
-    ["listen-indicator", { text: `  ${icons.dot} LISTENING [${bind}]:${port}`, fg: theme.color.muted }],
+    ["listen-indicator", listening
+      ? { text: `  ${icons.dot} LISTENING [${bind}]:${port}`, fg: theme.color.muted }
+      : { text: `  ${icons.dot} NOT LISTENING`, fg: theme.color.warning }],
     ["active-peer", { text: `  ${icons.arrow} ${truncate(activePeer?.name ?? "No peer", 18)}`, fg: theme.color.remote }],
     ["mode-label", { text: `  ${icons.dot} ${realMode ? "REAL FILES" : "SIMULATION"}`, fg: theme.color.warning }],
   ])
@@ -201,6 +204,7 @@ function renderWorkspace(parent: BoxRenderable, ctx: RenderContext): void {
     bodyHeader.add(actionButton(renderer, "toolbar-send", "Send", "send-review", actions.command))
     // Receive, Peers and Favorites only exist in the mock simulation.
     if (!realMode) bodyHeader.add(actionButton(renderer, "toolbar-receive", "Receive", "incoming", actions.command, { fg: theme.color.success }))
+    if (realMode) bodyHeader.add(actionButton(renderer, "toolbar-listen", ctx.real?.receiving === false ? "Not listening · L" : "Listening · L", "toggle-receive", actions.command, { fg: ctx.real?.receiving === false ? theme.color.warning : theme.color.success }))
   }
   if (dual && !compact) {
     bodyHeader.add(actionButton(renderer, "toolbar-stage", "Stage", "toggle-current", actions.command))
@@ -211,6 +215,9 @@ function renderWorkspace(parent: BoxRenderable, ctx: RenderContext): void {
       bodyHeader.add(actionButton(renderer, "toolbar-favorites", "Favorites", "favorites", actions.command, { fg: theme.color.warning }))
     }
     bodyHeader.add(actionButton(renderer, "toolbar-queue", "Queue", "queue", actions.command, { fg: theme.color.muted }))
+    if (realMode) {
+      bodyHeader.add(actionButton(renderer, "toolbar-listen", ctx.real?.receiving === false ? "Not listening · L" : "Listening · L", "toggle-receive", actions.command, { fg: ctx.real?.receiving === false ? theme.color.warning : theme.color.success }))
+    }
   }
   parent.add(bodyHeader)
 
@@ -750,6 +757,7 @@ function renderHelp(parent: BoxRenderable, ctx: RenderContext): void {
     ["Enter / Backspace", "Open directory / go to its parent"],
     ["s", realMode ? "Review staged files and send to the selected peer" : "Review staged files and simulate a send"],
     ["i", realMode ? "Incoming transfers arrive from the network" : "Create a mock incoming request"],
+    ...(realMode ? [["l", "Stop / start listening for incoming transfers"] as [string, string]] : []),
     realMode
       ? [`${icons.up} / ${icons.down} (Receiver)`, "Choose the peer to send to"]
       : ["q / v / p", "Peer preview / manual fingerprint comparison / Favorites"],

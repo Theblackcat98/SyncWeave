@@ -174,6 +174,12 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   let sasPrompt: SasPrompt | null = null
   let sendAborter: AbortController | null = null
   let receiveAborter: AbortController | null = null
+  // Real mode: the receive on/off toggle (P1-16). `receiving` mirrors whether
+  // a listener is bound; `activeListener` is the bound one (the bundle's at
+  // startup, a fresh one after a stop/start cycle).
+  let receiving = true
+  let activeListener: NoiseListener | null = null
+  let restartReceiveLoop: (() => void) | null = null
   /** Every real send/receive task; dispose() waits for these to settle. */
   const inFlight = new Set<Promise<unknown>>()
   let disposing: Promise<void> | null = null
@@ -216,7 +222,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       peers,
       favorites: peerService.favorites(),
       queue: state.transferQueue,
-      real: mode === "real" && dependencies.real ? { bindAddr: dependencies.real.bindAddr, tcpPort: dependencies.real.tcpPort } : null,
+      real: mode === "real" && dependencies.real ? { bindAddr: dependencies.real.bindAddr, tcpPort: dependencies.real.tcpPort, receiving } : null,
       actions: {
         command,
         selectEntry(pane, index) {
@@ -700,6 +706,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         openFavorites(); return
       case "queue": setScreen("queue"); return
       case "help": setScreen("help"); return
+      case "toggle-receive": toggleReceive(); return
       case "toggle-current": toggleCurrentEntry(); return
       case "pane-local": changePane("local"); return
       case "pane-remote": changePane("remote"); return
@@ -837,6 +844,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         }
         openFavorites(); return
       case "t": setScreen("queue"); return
+      case "l":
+        if (mode === "real") { command("toggle-receive"); return }
+        return
       case "?": setScreen("help"); return
       default: return
     }
@@ -1312,24 +1322,36 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       address === null ? null : real.discovery.listPeers().find((item) => item.address === address)?.alias ?? null
 
     // One session at a time (per the budget). A failure in one session never
-    // ends the loop; only a listener-level failure does.
-    const receiveLoop = async (): Promise<void> => {
-      for await (const hs of real.listener.accept()) {
-        if (disposed) break
-        try {
-          await track(receiveSession(hs, real, claimedAlias))
-        } catch (error) {
-          state.status = `Receive failed: ${errorText(error)}`
-          renderSafely()
+    // ends the loop; only a listener-level failure does. The loop is
+    // restartable so the receive toggle (P1-16) can bind a fresh listener
+    // after a stop.
+    activeListener = real.listener
+    const startReceiveLoop = (listener: NoiseListener): void => {
+      const receiveLoop = async (): Promise<void> => {
+        for await (const hs of listener.accept()) {
+          if (disposed) break
+          try {
+            await track(receiveSession(hs, real, claimedAlias))
+          } catch (error) {
+            state.status = `Receive failed: ${errorText(error)}`
+            renderSafely()
+          }
         }
       }
+      void receiveLoop().catch((error: unknown) => {
+        // A deliberate stop ends the generator without throwing; only a
+        // genuine listener failure lands here while still receiving.
+        if (!receiving || disposed) return
+        // Listener-level failure: surface it instead of going silently deaf.
+        if (realConsent) dropParkedConsent()
+        state.status = `Receive loop failed: ${errorText(error)}`
+        renderSafely()
+      })
     }
-    void receiveLoop().catch((error: unknown) => {
-      // Listener-level failure: surface it instead of going silently deaf.
-      if (realConsent) dropParkedConsent()
-      state.status = `Receive loop failed: ${errorText(error)}`
-      renderSafely()
-    })
+    restartReceiveLoop = () => {
+      if (activeListener) startReceiveLoop(activeListener)
+    }
+    startReceiveLoop(real.listener)
   }
 
   /** Park the SAS gate for one send: resolves true only when the user confirms the code (P0-1). */
@@ -1372,6 +1394,50 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       const id = fileList.find((file) => file.name === outcome.name)?.path
       if (id) state.staged.local.delete(id)
     }
+  }
+
+  /**
+   * Receive on/off toggle (P1-16). Off closes the listener: new connections
+   * are refused, while a session already accepted runs to completion (its
+   * channel belongs to the session, not the listener). On binds a fresh
+   * listener on the same address/port, still governed by the bundle's
+   * lifetime aborter so shutdown semantics are unchanged. Default behaviour
+   * is untouched: the app starts out listening.
+   */
+  function toggleReceive(): void {
+    if (mode !== "real" || !dependencies.real) return
+    const real = dependencies.real
+    if (receiving) {
+      receiving = false
+      const listener = activeListener
+      activeListener = null
+      if (listener) void listener.close().catch(() => undefined)
+      state.status = "Not listening · new incoming transfers are refused · l resumes listening"
+      logEvent("receive-off")
+      render()
+      return
+    }
+    receiving = true
+    state.status = "Starting listener…"
+    render()
+    void listenNoise({ host: real.bindAddr, port: real.tcpPort, signal: real.aborter.signal })
+      .then((listener) => {
+        if (disposed || !receiving) {
+          void listener.close().catch(() => undefined)
+          return
+        }
+        activeListener = listener
+        restartReceiveLoop?.()
+        state.status = `Listening on [${real.bindAddr}]:${real.tcpPort} · l stops listening`
+        logEvent("receive-on", `${real.bindAddr}:${real.tcpPort}`)
+        renderSafely()
+      })
+      .catch((error: unknown) => {
+        receiving = false
+        state.status = `Could not start listening: ${errorText(error)} · l retries`
+        logEvent("receive-on-failed", errorText(error))
+        renderSafely()
+      })
   }
 
   /** Cancel key (Esc/x) for a real send: rejects a parked SAS, or aborts the transfer. */
