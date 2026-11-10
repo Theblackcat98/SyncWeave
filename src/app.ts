@@ -1,7 +1,7 @@
 import { CliRenderEvents, type CliRenderer, type KeyEvent } from "@opentui/core"
 import { homedir } from "node:os"
 import { dirname } from "node:path"
-import type { AppMode, AppState, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
+import type { AppMode, AppState, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
 import { OTHER_PANE } from "./domain.js"
 import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
 import { listenNoise, type HandshakeResult } from "./services/transport.js"
@@ -199,6 +199,24 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       : peers[state.peerIndex % Math.max(1, peers.length)]
   const currentEntries = (pane = state.activePane) => filesystem.list(pane, state.paths[pane])
   const stagedEntries = (pane = state.activePane) => currentEntries(pane).filter((entry) => state.staged[pane].has(entry.id))
+  /**
+   * Every staged entry on a pane, across all folders. Staging is global —
+   * the activity bar counts it globally, and the real-mode checklist
+   * promises the review lists every staged file — but a listing only
+   * covers the folder on screen. Where the filesystem can resolve a staged
+   * ID directly (the real one, whose IDs are absolute paths), resolve each
+   * staged ID that way so files staged in other folders are gathered too.
+   * A file that vanished since staging resolves to nothing and drops out.
+   */
+  const allStagedEntries = (pane: Pane): MockEntry[] => {
+    if (!filesystem.describe) return stagedEntries(pane)
+    const entries: MockEntry[] = []
+    for (const id of state.staged[pane]) {
+      const entry = filesystem.describe(id)
+      if (entry) entries.push(entry)
+    }
+    return entries
+  }
   const visibleRows = () => visibleRowCount(renderer.terminalHeight || 24)
 
   function render(): void {
@@ -282,7 +300,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     // Real mode sends from the Local pane's staged set regardless of focus;
     // the Receiver pane lists peers, not sendable files.
     const pane = mode === "real" ? "local" : state.activePane
-    if (stagedEntries(pane).length === 0) {
+    if (allStagedEntries(pane).length === 0) {
       state.status = "Nothing staged in this folder · Space selects a file"
       render()
       return
@@ -1390,7 +1408,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       render()
       return
     }
-    const staged = stagedEntries("local")
+    const staged = allStagedEntries("local")
     // Special files (symlinks, FIFOs, sockets, devices) are listed but never
     // sent: a symlink to /dev/zero would hash forever, a FIFO would hang.
     const skipped = staged.filter((e) => e.kind === "file" && e.unsupported)
