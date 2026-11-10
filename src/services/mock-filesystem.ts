@@ -3,8 +3,8 @@ import type { FileSystemService } from "./ports.js"
 
 type Tree = Record<Pane, Record<string, MockEntry[]>>
 
-function entry(id: string, name: string, kind: "file" | "directory", bytes: number, state: MockEntry["state"], summary?: string): MockEntry {
-  return { id, name, kind, bytes, state, summary }
+function entry(id: string, name: string, kind: "file" | "directory", bytes: number, state: MockEntry["state"]): MockEntry {
+  return { id, name, kind, bytes, state }
 }
 
 const rootPath: Record<Pane, string> = { local: "~/projects/notes", remote: "MacBook-M3: ~/notes" }
@@ -12,7 +12,7 @@ const rootPath: Record<Pane, string> = { local: "~/projects/notes", remote: "Mac
 const scenario: Tree = {
   local: {
     [rootPath.local]: [
-      entry("architecture", "architecture-diagram.md", "file", 12_288, "modified", "Transport and retry policy diverged"),
+      entry("architecture", "architecture-diagram.md", "file", 12_288, "modified"),
       entry("todo", "daily-todo.txt", "file", 2_048, "synced"),
       entry("configs", "configs/", "directory", 0, "modified"),
       entry("build", "build-artifact.tar.gz", "file", 47_185_920, "added"),
@@ -36,7 +36,7 @@ const scenario: Tree = {
   },
   remote: {
     [rootPath.remote]: [
-      entry("architecture-remote", "architecture-diagram.md", "file", 14_336, "modified", "Remote transport section changed"),
+      entry("architecture-remote", "architecture-diagram.md", "file", 14_336, "modified"),
       entry("todo-remote", "daily-todo.txt", "file", 2_048, "synced"),
       entry("configs-remote", "configs/", "directory", 0, "modified"),
       entry("release", "release-v1.tar.gz", "file", 47_185_920, "added"),

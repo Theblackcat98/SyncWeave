@@ -212,7 +212,6 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       state,
       mode,
       filesystem,
-      peerService,
       receiveDestinations,
       peers,
       favorites: peerService.favorites(),
@@ -240,10 +239,6 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           if (state.cursors[pane] >= next + rows) state.cursors[pane] = next + rows - 1
           state.cursors[pane] = clamp(state.cursors[pane], 0, Math.max(0, entries.length - 1))
           animateFocus()
-          render()
-        },
-        selectConsentFile(index) {
-          state.selectedConsentFile = clamp(index, 0, Math.max(0, (state.request?.files.length ?? 1) - 1))
           render()
         },
         toggleConsentFile(index) {
@@ -791,15 +786,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         return
       }
       default:
-        if (name.startsWith("favorite-open:")) {
-          // Mock-only screen; unreachable in real mode (favorites are empty
-          // there), but gate defensively like the other mock commands.
-          if (mode === "real") return
-          const peerId = name.slice("favorite-open:".length)
-          const index = peers.findIndex((item) => item.id === peerId)
-          if (index >= 0) state.peerIndex = index
-          setScreen("peer")
-        }
+        return
     }
   }
 

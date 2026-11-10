@@ -25,7 +25,6 @@ export interface RenderActions {
   command: CommandHandler
   selectEntry(pane: Pane, index: number): void
   scrollPane(pane: Pane, direction: "up" | "down"): void
-  selectConsentFile(index: number): void
   toggleConsentFile(index: number): void
   selectFavorite(index: number): void
 }
@@ -35,7 +34,6 @@ export interface RenderData {
   state: AppState
   mode: AppMode
   filesystem: FileSystemService
-  peerService: PeerService
   receiveDestinations: readonly string[]
   peers: MockPeer[]
   favorites: ReturnType<PeerService["favorites"]>

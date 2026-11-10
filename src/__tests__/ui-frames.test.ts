@@ -137,12 +137,11 @@ test("receiver panel reports the real transfer in flight, not a mock session (P1
     state: app.state,
     mode: "real",
     filesystem: new MockFileSystemService(),
-    peerService: new MockPeerService(),
     receiveDestinations: ["/tmp"],
     peers: [{ id: "z0", name: "device-0", host: "10.0.0.1", port: 24816, fingerprint: "z0", online: true }],
     favorites: [],
     queue,
-    actions: { command() {}, selectEntry() {}, scrollPane() {}, selectConsentFile() {}, toggleConsentFile() {}, selectFavorite() {} },
+    actions: { command() {}, selectEntry() {}, scrollPane() {}, toggleConsentFile() {}, selectFavorite() {} },
     real: { bindAddr: "::", tcpPort: 24816 },
   })
   await setup.flush()
