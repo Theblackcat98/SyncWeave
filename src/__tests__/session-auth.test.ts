@@ -140,7 +140,7 @@ test("acceptance without Gate B confirmations is impossible", () => {
   expect(() => manager.acceptTransfer(forged, PEER_A, FILES)).toThrow()
 })
 
-test("session ids and nonces are unpredictable and unique per session", () => {
+test("session ids and nonces are unique across 50 sessions and 16 bytes each", () => {
   const manager = new SessionManager()
   const ids = new Set<string>()
   for (let i = 0; i < 50; i++) {
@@ -152,10 +152,10 @@ test("session ids and nonces are unpredictable and unique per session", () => {
   expect(ids.size).toBe(50)
 })
 
-test("role swap invalidates: a sender-session token is bound to its session, not its role label", () => {
+test("a transfer token replayed against a different session is rejected", () => {
   // The binding is (session id, peer identity, nonce, file set). A token
   // minted for one session never validates against another, regardless of
-  // role claims — there is no role field to swap that survives validation.
+  // the role label attached to it.
   const manager = new SessionManager()
   const sender = manager.createSession("sender")
   manager.recordIdentityConfirmation(sender.id, "local", PEER_A)

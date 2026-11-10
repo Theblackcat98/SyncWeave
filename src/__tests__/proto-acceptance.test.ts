@@ -316,7 +316,14 @@ test("R12: a receiver ERROR while the sender is streaming ends the send with the
       await peer.expect(FrameType.FileChunk)
       // The disk fills up after one chunk: say so, then stop reading.
       await peer.sendJson(FrameType.Error, { code: "E_NOSPC", reason: "simulated disk full" }, sid)
-      hs.channel.close()
+      // Do NOT close the channel here: under load the close could be
+      // processed by the sender before the ERROR frame is read, and the
+      // send would end with "peer closed" instead of the receiver's reason
+      // (the R12 flake). Wait, event-driven, for the sender to react to
+      // the ERROR by tearing down its side — observed as EOF here.
+      while ((await peer.next()) !== null) {
+        // Drain whatever the sender still had in flight until its teardown.
+      }
     })().catch(() => undefined)
 
     const sendError = await sendFiles({

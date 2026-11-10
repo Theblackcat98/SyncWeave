@@ -28,7 +28,7 @@ mock.module("node:fs/promises", () => {
 })
 
 const sink = await import("../services/safe-receive-sink.js")
-const { previewSavedName, receiveToFile, sanitizePeerBasename, sweepOrphanPartials } = sink
+const { previewSavedName, previewSavedNameWithCollisions, receiveToFile, sanitizePeerBasename, sweepOrphanPartials } = sink
 
 const directories: string[] = []
 
@@ -194,6 +194,26 @@ test("previewSavedName returns exactly the basename the sink saves, before any c
     expect(preview).not.toBeNull()
     expect(saved.name).toBe(preview!)
   }
+})
+
+test("previewSavedNameWithCollisions previews the (n) suffix resolveDestination would pick (P0-12)", async () => {
+  const directory = await makeDirectory()
+  const bytes = new TextEncoder().encode("collision bytes")
+  const savedOnce = await receiveToFile(once(bytes), optionsFor(directory, "report.txt", bytes))
+  expect(savedOnce.name).toBe("report.txt")
+  const taken = new Set(await readdir(directory))
+  expect(previewSavedNameWithCollisions("report.txt", taken)).toBe("report (1).txt")
+  taken.add("report (1).txt")
+  expect(previewSavedNameWithCollisions("report.txt", taken)).toBe("report (2).txt")
+  expect(previewSavedNameWithCollisions("fresh.txt", taken)).toBe("fresh.txt")
+  expect(previewSavedNameWithCollisions("../..", taken)).toBeNull()
+  // The preview must agree with the name the protocol layer resolves and
+  // the sink then saves under for the second copy.
+  const { resolveDestination } = await import("../services/transfer-protocol.js")
+  const resolved = await resolveDestination(directory, "report.txt")
+  expect(resolved).toBe("report (1).txt")
+  const savedTwice = await receiveToFile(once(bytes), optionsFor(directory, resolved, bytes))
+  expect(savedTwice.name).toBe("report (1).txt")
 })
 
 test("previewSavedName returns null for names the sink would reject, and honours the byte bound", () => {

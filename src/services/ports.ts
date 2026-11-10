@@ -9,14 +9,19 @@ import type {
   TransferRecord,
 } from "../domain.js"
 
+/** One page of a directory listing. Matches MAX_DIRECTORY_ENTRIES in
+ *  real-filesystem.ts — the service never materializes more than this many
+ *  entries per list() call, so the UI pages with the same size (P1-23). */
+export const LIST_PAGE_SIZE = 10_000
+
 export interface FileSystemService {
   readonly paths: Record<Pane, string>
-  list(pane: Pane, path: string): MockEntry[]
+  list(pane: Pane, path: string, options?: { offset?: number; limit?: number }): MockEntry[]
   parentPath(path: string): string
   markSynced(pane: Pane, ids: string[]): void
   getDiff(id: string): string[]
-  /** Total entries before truncation (real fs only); undefined if unknown. */
-  listTotal?(pane: Pane, path: string): number | undefined
+  /** Total entries at the path, ignoring paging — what list() windows into. */
+  listTotal(pane: Pane, path: string): number
   /** Last list() error for this path (real fs only); null if none. */
   listError?(pane: Pane, path: string): string | null
 }

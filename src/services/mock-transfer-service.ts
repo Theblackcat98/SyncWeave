@@ -108,13 +108,6 @@ export function renamed(name: string): string {
   return dot > 0 ? `${name.slice(0, dot)}${suffix}${name.slice(dot)}` : `${name}${suffix}`
 }
 
-export function transferSummary(record: TransferRecord): string {
-  const count = record.acceptedFiles.length
-  if (!count) return "No files selected"
-  const label = `${count} file${count === 1 ? "" : "s"}`
-  return `${label} · ${record.peerName} · ${record.destination}`
-}
-
 function copy(record: TransferRecord): TransferRecord {
   return { ...record, files: [...record.files], acceptedFiles: [...record.acceptedFiles], fileIds: [...record.fileIds] }
 }

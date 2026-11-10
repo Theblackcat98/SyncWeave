@@ -154,6 +154,41 @@ export function previewSavedName(peerName: string, maxNameBytes = 255): string |
   }
 }
 
+/**
+ * The basename `receiveToFile` would save for `peerName` given the names
+ * already taken in the destination (P0-12): sanitize, then the same
+ * `name (n).ext` collision walk `resolveDestination` performs — stem cut to
+ * the byte budget, suffix never cut, extension is the last dot when it fits
+ * in 32 bytes, at most 9999 collisions. Purely a preview: the sink
+ * re-resolves against the live directory at save time. Returns null when
+ * the name itself would be rejected or every suffix is taken.
+ */
+export function previewSavedNameWithCollisions(peerName: string, taken: ReadonlySet<string>, maxNameBytes = 255): string | null {
+  const safe = previewSavedName(peerName, maxNameBytes)
+  if (safe === null) return null
+  if (!taken.has(safe)) return safe
+  const dot = safe.lastIndexOf(".")
+  const ext = dot > 0 && Buffer.byteLength(safe.slice(dot), "utf8") <= 32 ? safe.slice(dot) : ""
+  const stem = ext ? safe.slice(0, dot) : safe
+  for (let i = 1; i <= 9999; i++) {
+    const suffix = ` (${i})${ext}`
+    const candidate = truncateUtf8(stem, maxNameBytes - Buffer.byteLength(suffix, "utf8")) + suffix
+    if (!taken.has(candidate)) return candidate
+  }
+  return null
+}
+
+/** Names currently in a directory, for consent-screen collision previews.
+ *  An unreadable directory previews as empty (the save itself will fail
+ *  visibly later if the destination is truly unusable). */
+export async function listDestinationNames(directory: string): Promise<Set<string>> {
+  try {
+    return new Set(await readdir(directory))
+  } catch {
+    return new Set()
+  }
+}
+
 function errorCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error)) return undefined
   return typeof error.code === "string" ? error.code : undefined
