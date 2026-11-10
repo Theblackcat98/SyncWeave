@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import { dirname } from "node:path"
 import type { AppMode, AppState, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
 import { OTHER_PANE } from "./domain.js"
-import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
+import { LIST_PAGE_SIZE, type FileSystemService, type PeerService, type TransferService } from "./services/ports.js"
 import { listenNoise, type HandshakeResult } from "./services/transport.js"
 import {
   receiveFiles,
@@ -204,7 +204,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     mode === "real"
       ? peers.find((item) => item.id === selectedPeerId)
       : peers[state.peerIndex % Math.max(1, peers.length)]
-  const currentEntries = (pane = state.activePane) => filesystem.list(pane, state.paths[pane])
+  // Listings are paged (P1-23): one LIST_PAGE_SIZE window at a time, so
+  // entries past the service's 10,000-entry cap stay reachable by cursor.
+  const currentEntries = (pane = state.activePane) =>
+    filesystem.list(pane, state.paths[pane], { offset: state.listOffsets[pane], limit: LIST_PAGE_SIZE })
   const stagedEntries = (pane = state.activePane) => currentEntries(pane).filter((entry) => state.staged[pane].has(entry.id))
   // One layout source for app and renderer alike (P2-17): the app's cursor
   // bookkeeping must agree with the rows the renderer actually draws.
@@ -457,8 +460,34 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       return
     }
     const entries = currentEntries()
-    state.cursors[state.activePane] = stepCursor(state.cursors[state.activePane], delta, entries.length)
-    keepCursorVisible(state.activePane)
+    const pane = state.activePane
+    const cursor = state.cursors[pane]
+    // Page turns (P1-23): a single step past either end of the loaded window
+    // loads the adjacent page when the directory has one.
+    if (delta === 1 && cursor >= entries.length - 1 && entries.length > 0) {
+      const total = filesystem.listTotal(pane, state.paths[pane])
+      if (state.listOffsets[pane] + entries.length < total) {
+        state.listOffsets[pane] += LIST_PAGE_SIZE
+        state.cursors[pane] = 0
+        state.scrollOffsets[pane] = 0
+        keepCursorVisible(pane)
+        animateFocus()
+        render()
+        return
+      }
+    }
+    if (delta === -1 && cursor <= 0 && state.listOffsets[pane] > 0) {
+      state.listOffsets[pane] = Math.max(0, state.listOffsets[pane] - LIST_PAGE_SIZE)
+      const previous = currentEntries(pane)
+      state.cursors[pane] = Math.max(0, previous.length - 1)
+      state.scrollOffsets[pane] = 0
+      keepCursorVisible(pane)
+      animateFocus()
+      render()
+      return
+    }
+    state.cursors[pane] = stepCursor(state.cursors[pane], delta, entries.length)
+    keepCursorVisible(pane)
     animateFocus()
     render()
   }
@@ -498,6 +527,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.paths[state.activePane] = `${state.paths[state.activePane].replace(/\/$/, "")}/${entry.name.replace(/\/$/, "")}`
     state.cursors[state.activePane] = 0
     state.scrollOffsets[state.activePane] = 0
+    state.listOffsets[state.activePane] = 0
     state.status = `Opened ${mode === "real" ? "folder" : "mock folder"} ${entry.name}`
     render()
   }
@@ -521,6 +551,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.paths[state.activePane] = filesystem.parentPath(current)
     state.cursors[state.activePane] = 0
     state.scrollOffsets[state.activePane] = 0
+    state.listOffsets[state.activePane] = 0
     state.status = mode === "real" ? "Moved to parent folder" : "Moved to parent mock folder"
     render()
   }
@@ -533,6 +564,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     fs.setShowHidden(showHiddenFiles)
     state.cursors.local = 0
     state.scrollOffsets.local = 0
+    state.listOffsets.local = 0
     state.status = showHiddenFiles ? "Showing hidden files · . hides them" : "Hiding hidden files · . shows them"
     render()
   }
@@ -542,6 +574,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.activePane = "local"
     state.cursors.local = 0
     state.scrollOffsets.local = 0
+    state.listOffsets.local = 0
     state.status = "Moved to your home folder"
     render()
   }

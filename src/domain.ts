@@ -84,6 +84,9 @@ export interface AppState {
   cursors: Record<Pane, number>
   paths: Record<Pane, string>
   scrollOffsets: Record<Pane, number>
+  /** Directory-listing page window per pane (P1-23): entries are listed one
+   *  page at a time so folders past the service cap stay reachable. */
+  listOffsets: Record<Pane, number>
   staged: Record<Pane, Set<string>>
   status: string
   identityStep: number

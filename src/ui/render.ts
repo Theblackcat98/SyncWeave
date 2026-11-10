@@ -2,7 +2,7 @@ import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/cor
 import type { AppMode, AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
 import { previewSavedName } from "../services/safe-receive-sink.js"
 import { formatBytes } from "../domain.js"
-import type { FileSystemService, PeerService } from "../services/ports.js"
+import { LIST_PAGE_SIZE, type FileSystemService, type PeerService } from "../services/ports.js"
 import { icons, motion, theme } from "../theme.js"
 import { actionButton, actionRow, asciiSafe, label, panel, progressGauge, stateColor, stateGlyph, truncate, type CommandHandler } from "./primitives.js"
 import {
@@ -94,13 +94,13 @@ export function renderApp(data: RenderData): void {
   root.add(renderFooter(ctx))
 }
 
-/** Each render reads a pane's directory once and reuses the result. */
+/** Each render reads a pane's current listing page once and reuses it. */
 function listingCache(filesystem: FileSystemService, state: AppState): (pane: Pane) => MockEntry[] {
   const cache = new Map<Pane, MockEntry[]>()
   return (pane) => {
     let entries = cache.get(pane)
     if (!entries) {
-      entries = filesystem.list(pane, state.paths[pane])
+      entries = filesystem.list(pane, state.paths[pane], { offset: state.listOffsets[pane], limit: LIST_PAGE_SIZE })
       cache.set(pane, entries)
     }
     return entries
@@ -322,9 +322,10 @@ function renderPane(ctx: RenderContext, pane: Pane, paneWidth: number): BoxRende
       : realMode ? "This folder is empty." : "This mock folder is empty."
     paneBox.add(label(renderer, `${pane}-empty`, truncate(emptyText, inner), listErr ? theme.color.danger : theme.color.muted))
   } else {
-    const total = ctx.filesystem.listTotal?.(pane, state.paths[pane])
-    if (total !== undefined && total > entries.length) {
-      paneBox.add(label(renderer, `${pane}-truncated`, truncate(`Showing first ${entries.length} of ${total} entries`, inner), theme.color.muted))
+    const total = ctx.filesystem.listTotal(pane, state.paths[pane])
+    if (total > entries.length) {
+      const pageStart = state.listOffsets[pane]
+      paneBox.add(label(renderer, `${pane}-truncated`, truncate(`Showing ${pageStart + 1}–${pageStart + entries.length} of ${total} entries · ↓ past the end turns the page`, inner), theme.color.muted))
     }
   }
   return paneBox

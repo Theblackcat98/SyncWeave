@@ -95,8 +95,15 @@ export class MockFileSystemService implements FileSystemService {
   readonly paths = rootPath
   private readonly files: Tree = structuredClone(scenario)
 
-  list(pane: Pane, path: string): MockEntry[] {
-    return (this.files[pane][path] ?? []).map((item) => ({ ...item }))
+  list(pane: Pane, path: string, options?: { offset?: number; limit?: number }): MockEntry[] {
+    const all = this.files[pane][path] ?? []
+    const offset = options?.offset ?? 0
+    const limit = options?.limit ?? all.length
+    return all.slice(offset, offset + limit).map((item) => ({ ...item }))
+  }
+
+  listTotal(pane: Pane, path: string): number {
+    return (this.files[pane][path] ?? []).length
   }
 
   parentPath(path: string): string {

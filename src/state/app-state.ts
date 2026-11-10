@@ -19,6 +19,7 @@ export function createInitialAppState(paths: Record<Pane, string>, reducedMotion
     cursors: { local: 0, remote: 0 },
     paths: { local: paths.local, remote: paths.remote },
     scrollOffsets: { local: 0, remote: 0 },
+    listOffsets: { local: 0, remote: 0 },
     staged: { local: new Set(), remote: new Set() },
     status: "Ready · all peers, files and transfers are simulated",
     identityStep: 0,
