@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdir, mkdtemp, rm, truncate } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, truncate } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -47,6 +47,24 @@ test("P0-11: a FIFO source is refused with a clear per-file message and never bl
     ])
     expect(Date.now() - started).toBeLessThan(5_000)
     expect((error as Error).message).toMatch(/cannot send pipe: it is a named pipe/)
+  })
+}, 15_000)
+
+test("P0-11: a symlink source is refused with a clear per-file message", async () => {
+  await withDir(async (dir) => {
+    const file = await writeProtoFile(dir, "target.bin", 10)
+    const link = join(dir, "link.bin")
+    await symlink(file, link)
+    const error = await sendFiles({
+      host: "127.0.0.1",
+      port: UNUSED_PORT,
+      files: [{ path: link, name: "link.bin" }],
+      identity: generateEphemeralIdentity(),
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect((error as Error).message).toMatch(/cannot send link\.bin: it is a symlink/)
   })
 }, 15_000)
 

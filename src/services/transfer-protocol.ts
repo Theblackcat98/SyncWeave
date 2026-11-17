@@ -784,6 +784,7 @@ interface FileSnapshot {
 }
 
 function nonRegularReason(st: Stats): string {
+  if (st.isSymbolicLink()) return "it is a symlink"
   if (st.isDirectory()) return "it is a directory"
   if (st.isFIFO()) return "it is a named pipe"
   if (st.isSocket()) return "it is a socket"
@@ -806,7 +807,7 @@ async function checkSendSources(
   let total = 0
   for (const source of sources) {
     signal?.throwIfAborted()
-    const st = await fs.stat(source.path)
+    const st = await fs.lstat(source.path)
     if (!st.isFile()) {
       throw new Error(`cannot send ${source.name}: ${nonRegularReason(st)}`)
     }
@@ -832,7 +833,15 @@ async function snapshotFile(
   signal?: AbortSignal,
   onHashProgress?: (fileIndex: number, fileCount: number, fileName: string) => void,
 ): Promise<FileSnapshot> {
-  const handle = await fs.open(source.path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+  let handle: FileHandle
+  try {
+    handle = await fs.open(source.path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(`cannot send ${source.name}: it is a symlink`)
+    }
+    throw error
+  }
   try {
     const st = await handle.stat()
     if (!st.isFile()) {
