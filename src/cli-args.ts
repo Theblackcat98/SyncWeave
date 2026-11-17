@@ -6,6 +6,7 @@
 import { randomBytes } from "node:crypto"
 import { isIP } from "node:net"
 import { isTruthyFlag } from "./state/app-state.js"
+import { DISCOVERY_PORT } from "./services/discovery.js"
 
 export class CliError extends Error {}
 
@@ -23,6 +24,8 @@ export interface CliOptions {
   realMode: boolean
   alias: string
   tcpPort: number
+  /** UDP port for multicast discovery (--discovery-port); DISCOVERY_PORT by default. */
+  discoveryPort: number
   bindAddr: string
   /** True when --bind was given. An explicit bind never falls back (D4). */
   bindExplicit: boolean
@@ -35,7 +38,7 @@ export interface CliOptions {
 
 const DEFAULT_PORT = 24816
 const MAX_ALIAS_CHARS = 64
-const VALUE_FLAGS = new Set(["--alias", "--port", "--peer", "--bind", "--root"])
+const VALUE_FLAGS = new Set(["--alias", "--port", "--discovery-port", "--peer", "--bind", "--root"])
 
 /** Random per-run suffix for the default alias ("syncweave-XXXX"). Never $USER. */
 function randomAliasSuffix(): string {
@@ -152,6 +155,7 @@ export function parseArgs(
       realMode,
       alias: "syncweave",
       tcpPort: DEFAULT_PORT,
+      discoveryPort: DISCOVERY_PORT,
       bindAddr: "::",
       bindExplicit: false,
       rootDir: null,
@@ -173,6 +177,7 @@ export function parseArgs(
   }
 
   const tcpPort = parsePort(values.get("--port") ?? String(DEFAULT_PORT), "--port value")
+  const discoveryPort = parsePort(values.get("--discovery-port") ?? String(DISCOVERY_PORT), "--discovery-port value")
 
   const bindRaw = values.get("--bind")
   const bindAddr = bindRaw ?? "::"
@@ -188,6 +193,7 @@ export function parseArgs(
     realMode,
     alias,
     tcpPort,
+    discoveryPort,
     bindAddr,
     bindExplicit: bindRaw !== undefined,
     rootDir,

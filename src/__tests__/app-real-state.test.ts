@@ -157,6 +157,25 @@ describe("directory keys (P1-26)", () => {
   })
 })
 
+describe("receive on/off toggle (P1-16)", () => {
+  test("l stops listening and l again binds a fresh listener on the same port", async () => {
+    const fixture = await makeFixture()
+    await new Promise((r) => setTimeout(r, 20))
+    await fixture.setup.mockInput.pressKeys(["l"], 5)
+    await fixture.setup.flush()
+    expect(fixture.app.state.status).toContain("Not listening")
+    expect(fixture.setup.captureCharFrame()).toContain("NOT LISTENING")
+    await fixture.setup.mockInput.pressKeys(["l"], 5)
+    // Binding is async; wait for the loop to report the new listener.
+    const deadline = Date.now() + 2_000
+    while (!fixture.app.state.status.includes("Listening on") && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    expect(fixture.app.state.status).toContain("Listening on")
+    expect(fixture.setup.captureCharFrame()).toContain("LISTENING")
+  })
+})
+
 describe("fingerprints and env flags (P2-2)", () => {
   test("a fingerprint skips the fixed prefix and groups the random part in fours", () => {
     const peerId = "z4XTTM" + "ABCD1234efgh5678IJKL9012"

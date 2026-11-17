@@ -109,7 +109,10 @@ export class RealFileSystemService implements FileSystemService {
   private showHiddenFiles: boolean
   private cache: ListingCache | null = null
 
-  listTotal(): number | undefined {
+  /** Total entries in the most recently listed directory (before paging).
+   *  The pane/path arguments are accepted for the FileSystemService port;
+   *  callers list the pane first, so the last list is the one they mean. */
+  listTotal(_pane?: Pane, _path?: string): number {
     return this.lastListTotal
   }
 

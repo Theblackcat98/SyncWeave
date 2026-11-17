@@ -1,8 +1,10 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
-import type { AppMode, AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
-import { previewSavedName } from "../services/safe-receive-sink.js"
+import pkg from "../../package.json" with { type: "json" }
+import type { AppMode, AppState, ConsentFile, ConsentRequest, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
+import type { FsEntry } from "../services/real-filesystem.js"
+import { previewSavedName, previewSavedNameWithCollisions } from "../services/safe-receive-sink.js"
 import { formatBytes } from "../domain.js"
-import type { FileSystemService, PeerService } from "../services/ports.js"
+import { LIST_PAGE_SIZE, type FileSystemService, type PeerService } from "../services/ports.js"
 import { icons, motion, theme } from "../theme.js"
 import { actionButton, actionRow, asciiSafe, label, panel, progressGauge, stateColor, stateGlyph, truncate, type CommandHandler } from "./primitives.js"
 import {
@@ -25,7 +27,6 @@ export interface RenderActions {
   command: CommandHandler
   selectEntry(pane: Pane, index: number): void
   scrollPane(pane: Pane, direction: "up" | "down"): void
-  selectConsentFile(index: number): void
   toggleConsentFile(index: number): void
   selectFavorite(index: number): void
 }
@@ -35,13 +36,15 @@ export interface RenderData {
   state: AppState
   mode: AppMode
   filesystem: FileSystemService
-  peerService: PeerService
   receiveDestinations: readonly string[]
   peers: MockPeer[]
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
   actions: RenderActions
-  real?: { bindAddr: string; tcpPort: number } | null
+  real?: { bindAddr: string; tcpPort: number; receiving?: boolean } | null
+  /** Names already present in the selected receive destination, for the
+   *  consent screen's collision-suffix previews (P0-12). */
+  consentTakenNames?: ReadonlySet<string>
 }
 
 interface RenderContext extends RenderData {
@@ -96,13 +99,13 @@ export function renderApp(data: RenderData): void {
   root.add(renderFooter(ctx))
 }
 
-/** Each render reads a pane's directory once and reuses the result. */
+/** Each render reads a pane's current listing page once and reuses it. */
 function listingCache(filesystem: FileSystemService, state: AppState): (pane: Pane) => MockEntry[] {
   const cache = new Map<Pane, MockEntry[]>()
   return (pane) => {
     let entries = cache.get(pane)
     if (!entries) {
-      entries = filesystem.list(pane, state.paths[pane])
+      entries = filesystem.list(pane, state.paths[pane], { offset: state.listOffsets[pane], limit: LIST_PAGE_SIZE })
       cache.set(pane, entries)
     }
     return entries
@@ -132,7 +135,7 @@ function renderHeader(ctx: RenderContext): BoxRenderable {
   })
   const inner = headerInnerWidth(vp)
   const realMode = mode === "real"
-  const brand = truncate(`${icons.mark} SyncWeave 0.1.0`, inner)
+  const brand = truncate(`${icons.mark} SyncWeave ${pkg.version}`, inner)
   header.add(label(renderer, "brand", brand, theme.typography.brand))
 
   const frame = icons.discoveryFrames[state.discoveryFrame % icons.discoveryFrames.length]
@@ -153,10 +156,13 @@ function renderHeader(ctx: RenderContext): BoxRenderable {
   // active peer, tagline) until the rest fits; nothing wraps (R13).
   const bind = ctx.real?.bindAddr ?? "::"
   const port = ctx.real?.tcpPort ?? 0
+  const listening = ctx.real?.receiving !== false
   const activePeer = peers[state.peerIndex % Math.max(1, peers.length)]
   const segments = new Map<string, { text: string; fg: string }>([
     ["header-tagline", { text: "  TUI FILE TRANSFER", fg: theme.color.muted }],
-    ["listen-indicator", { text: `  ${icons.dot} LISTENING [${bind}]:${port}`, fg: theme.color.muted }],
+    ["listen-indicator", listening
+      ? { text: `  ${icons.dot} LISTENING [${bind}]:${port}`, fg: theme.color.muted }
+      : { text: `  ${icons.dot} NOT LISTENING`, fg: theme.color.warning }],
     ["active-peer", { text: `  ${icons.arrow} ${truncate(activePeer?.name ?? "No peer", 18)}`, fg: theme.color.remote }],
     ["mode-label", { text: `  ${icons.dot} ${realMode ? "REAL FILES" : "SIMULATION"}`, fg: theme.color.warning }],
   ])
@@ -203,6 +209,7 @@ function renderWorkspace(parent: BoxRenderable, ctx: RenderContext): void {
     bodyHeader.add(actionButton(renderer, "toolbar-send", "Send", "send-review", actions.command))
     // Receive, Peers and Favorites only exist in the mock simulation.
     if (!realMode) bodyHeader.add(actionButton(renderer, "toolbar-receive", "Receive", "incoming", actions.command, { fg: theme.color.success }))
+    if (realMode) bodyHeader.add(actionButton(renderer, "toolbar-listen", ctx.real?.receiving === false ? "Not listening · L" : "Listening · L", "toggle-receive", actions.command, { fg: ctx.real?.receiving === false ? theme.color.warning : theme.color.success }))
   }
   if (dual && !compact) {
     bodyHeader.add(actionButton(renderer, "toolbar-stage", "Stage", "toggle-current", actions.command))
@@ -213,6 +220,9 @@ function renderWorkspace(parent: BoxRenderable, ctx: RenderContext): void {
       bodyHeader.add(actionButton(renderer, "toolbar-favorites", "Favorites", "favorites", actions.command, { fg: theme.color.warning }))
     }
     bodyHeader.add(actionButton(renderer, "toolbar-queue", "Queue", "queue", actions.command, { fg: theme.color.muted }))
+    if (realMode) {
+      bodyHeader.add(actionButton(renderer, "toolbar-listen", ctx.real?.receiving === false ? "Not listening · L" : "Listening · L", "toggle-receive", actions.command, { fg: ctx.real?.receiving === false ? theme.color.warning : theme.color.success }))
+    }
   }
   parent.add(bodyHeader)
 
@@ -317,9 +327,10 @@ function renderPane(ctx: RenderContext, pane: Pane, paneWidth: number): BoxRende
       : realMode ? "This folder is empty." : "This mock folder is empty."
     paneBox.add(label(renderer, `${pane}-empty`, truncate(emptyText, inner), listErr ? theme.color.danger : theme.color.muted))
   } else {
-    const total = ctx.filesystem.listTotal?.(pane, state.paths[pane])
-    if (total !== undefined && total > entries.length) {
-      paneBox.add(label(renderer, `${pane}-truncated`, truncate(`Showing first ${entries.length} of ${total} entries`, inner), theme.color.muted))
+    const total = ctx.filesystem.listTotal(pane, state.paths[pane])
+    if (total > entries.length) {
+      const pageStart = state.listOffsets[pane]
+      paneBox.add(label(renderer, `${pane}-truncated`, truncate(`Showing ${pageStart + 1}–${pageStart + entries.length} of ${total} entries · ↓ past the end turns the page`, inner), theme.color.muted))
     }
   }
   return paneBox
@@ -489,7 +500,10 @@ function renderSendReview(parent: BoxRenderable, ctx: RenderContext): void {
   const budget = Math.max(0, cardContentRows(vp) - fixed)
   const showCount = files.length <= budget ? files.length : Math.max(0, budget - 1)
   files.slice(0, showCount).forEach((file, index) => {
-    card.add(label(renderer, `send-file-${index}`, truncate(`  ${icons.check} ${file.name}  ${formatBytes(file.bytes)}`, inner), theme.color.text))
+    // Symlinks are staged but never sent; show where the link points so the
+    // review screen says what the entry actually is (P0-11).
+    const target = (file as FsEntry).symlinkTarget
+    card.add(label(renderer, `send-file-${index}`, truncate(`  ${icons.check} ${file.name}${target ? ` → ${target}` : ""}  ${formatBytes(file.bytes)}`, inner), theme.color.text))
   })
   if (files.length > showCount) card.add(label(renderer, "send-overflow", `  + ${files.length - showCount} more`, theme.color.muted))
   card.add(label(renderer, "send-consent-explainer", truncate(realMode
@@ -568,7 +582,10 @@ function renderConsent(parent: BoxRenderable, ctx: RenderContext): void {
     card.add(label(renderer, "consent-scroll-hint", truncate(`${hint} ${icons.dot} ${acceptedCount}/${request.files.length} accepted`, inner), theme.color.muted))
   }
   const list = panel(renderer, "consent-file-list", { flexDirection: "column", flexGrow: 1, minHeight: 1, marginTop: 1 })
-  request.files.slice(offset, offset + windowSize).forEach((file, i) => list.add(renderConsentFile(ctx, file, offset + i, inner)))
+  // Collision previews must account for every file in the request, not
+  // just the visible window: an earlier duplicate claims the plain name.
+  const savedNames = realMode ? computeConsentSavedNames(ctx, request) : null
+  request.files.slice(offset, offset + windowSize).forEach((file, i) => list.add(renderConsentFile(ctx, file, offset + i, inner, savedNames?.[offset + i])))
   card.add(list)
   const optionButtons = [
     actionButton(renderer, "toggle-selected", optionCaptions[0]!, "toggle-consent", actions.command, { fg: theme.color.warning }),
@@ -589,7 +606,19 @@ function renderConsent(parent: BoxRenderable, ctx: RenderContext): void {
   parent.add(card)
 }
 
-function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number, inner: number): BoxRenderable {
+/** Per-file saved-name previews for the consent screen (P0-12): each file
+ *  claims its previewed name so duplicates inside one request suffix
+ *  against each other as well as against the destination's contents. */
+function computeConsentSavedNames(ctx: RenderContext, request: ConsentRequest): Array<string | null> {
+  const taken = new Set(ctx.consentTakenNames ?? [])
+  return request.files.map((file) => {
+    const saved = previewSavedNameWithCollisions(file.name, taken)
+    if (saved !== null) taken.add(saved)
+    return saved
+  })
+}
+
+function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number, inner: number, precomputedSaved?: string | null): BoxRenderable {
   const { renderer, state, actions, mode } = ctx
   const selected = state.selectedConsentFile === index
   const row = panel(renderer, `consent-file-${index}`, {
@@ -606,8 +635,9 @@ function renderConsentFile(ctx: RenderContext, file: ConsentFile, index: number,
   let name = file.renamed && mode !== "real" ? renamePreview(file.name) : file.name
   if (mode === "real") {
     // Show what the sink will actually write (P0-12): sanitizing can change
-    // the name, and a rejected name must be visible before accepting.
-    const saved = previewSavedName(file.name)
+    // the name, a collision adds its ` (n)` suffix, and a rejected name
+    // must be visible before accepting.
+    const saved = precomputedSaved !== undefined ? precomputedSaved : previewSavedName(file.name)
     if (saved === null) name = `${file.name} (name will be rejected)`
     else if (saved !== file.name) name = `${file.name} → saved as ${saved}`
   }
@@ -752,6 +782,7 @@ function renderHelp(parent: BoxRenderable, ctx: RenderContext): void {
     ["Enter / Backspace", "Open directory / go to its parent"],
     ["s", realMode ? "Review staged files and send to the selected peer" : "Review staged files and simulate a send"],
     ["i", realMode ? "Incoming transfers arrive from the network" : "Create a mock incoming request"],
+    ...(realMode ? [["l", "Stop / start listening for incoming transfers"] as [string, string]] : []),
     realMode
       ? [`${icons.up} / ${icons.down} (Receiver)`, "Choose the peer to send to"]
       : ["q / v / p", "Peer preview / manual fingerprint comparison / Favorites"],

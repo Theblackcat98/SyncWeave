@@ -37,6 +37,14 @@ describe("parseArgs", () => {
     expect(opts.rootDir).toBe("/tmp")
   })
 
+  test("--discovery-port defaults to the discovery port and parses both forms (m-P1-8)", () => {
+    expect(parseArgs([], {}).discoveryPort).toBe(24817)
+    expect(parseArgs(["--discovery-port", "30000"], {}).discoveryPort).toBe(30000)
+    expect(parseArgs(["--discovery-port=30001"], {}).discoveryPort).toBe(30001)
+    expect(() => parseArgs(["--discovery-port", "0"], {})).toThrow(/--discovery-port/)
+    expect(() => parseArgs(["--discovery-port", "abc"], {})).toThrow(/--discovery-port/)
+  })
+
   test("--real accepts =1/=true/=0/=false (no silent mock fallback)", () => {
     expect(parseArgs(["--real=1"], {}).realMode).toBe(true)
     expect(parseArgs(["--real=true"], {}).realMode).toBe(true)

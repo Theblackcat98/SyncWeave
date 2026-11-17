@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import { dirname } from "node:path"
 import type { AppMode, AppState, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
 import { OTHER_PANE } from "./domain.js"
-import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
+import { LIST_PAGE_SIZE, type FileSystemService, type PeerService, type TransferService } from "./services/ports.js"
 import { listenNoise, type HandshakeResult } from "./services/transport.js"
 import {
   receiveFiles,
@@ -19,8 +19,10 @@ import { friendlyErrorMessage } from "./services/friendly-errors.js"
 import type { DiscoveryService } from "./services/discovery.js"
 import { logEvent } from "./services/diagnostic-log.js"
 import { addDestination, cycleDestinationIndex, removeDestination, saveDestinations, validateDestinationPath } from "./services/destinations.js"
-import { createInitialAppState, visibleRowCount } from "./state/app-state.js"
+import { listDestinationNames } from "./services/safe-receive-sink.js"
+import { createInitialAppState } from "./state/app-state.js"
 import { clamp, stepCursor } from "./cursor.js"
+import { viewportOf, visiblePaneRows } from "./ui/layout.js"
 import { syncDiscoveredPeers } from "./peer-sync.js"
 import { motion } from "./theme.js"
 import { AnimationClock } from "./ui/animation-clock.js"
@@ -88,6 +90,8 @@ export interface RealTransport {
   discovery: DiscoveryService
   alias: string
   tcpPort: number
+  /** UDP discovery port override (--discovery-port); undefined = service default. */
+  discoveryPort?: number
   /** Directory where received files are written. */
   receiveDirectory: string
   /** Aborts the listener accept loop; aborted on app dispose. */
@@ -173,6 +177,29 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   let sasPrompt: SasPrompt | null = null
   let sendAborter: AbortController | null = null
   let receiveAborter: AbortController | null = null
+  // Real mode: the receive on/off toggle (P1-16). `receiving` mirrors whether
+  // a listener is bound; `activeListener` is the bound one (the bundle's at
+  // startup, a fresh one after a stop/start cycle).
+  let receiving = true
+  let activeListener: NoiseListener | null = null
+  let restartReceiveLoop: (() => void) | null = null
+  // Names present in the selected receive destination, for the consent
+  // screen's collision-suffix previews (P0-12). Refreshed when the selected
+  // destination changes; the preview is advisory — the sink re-resolves
+  // against the live directory at save time.
+  let consentTakenNames: ReadonlySet<string> = new Set()
+  let consentTakenDir: string | null = null
+  function refreshConsentTakenNames(): void {
+    if (mode !== "real") return
+    const dir = receiveDestinations[state.receiveDestinationIndex % Math.max(1, receiveDestinations.length)]
+    if (!dir || dir === consentTakenDir) return
+    consentTakenDir = dir
+    void listDestinationNames(dir).then((names) => {
+      if (disposed || consentTakenDir !== dir) return
+      consentTakenNames = names
+      if (state.screen === "consent") renderSafely()
+    })
+  }
   /** Every real send/receive task; dispose() waits for these to settle. */
   const inFlight = new Set<Promise<unknown>>()
   let disposing: Promise<void> | null = null
@@ -197,24 +224,30 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     mode === "real"
       ? peers.find((item) => item.id === selectedPeerId)
       : peers[state.peerIndex % Math.max(1, peers.length)]
-  const currentEntries = (pane = state.activePane) => filesystem.list(pane, state.paths[pane])
+  // Listings are paged (P1-23): one LIST_PAGE_SIZE window at a time, so
+  // entries past the service's 10,000-entry cap stay reachable by cursor.
+  const currentEntries = (pane = state.activePane) =>
+    filesystem.list(pane, state.paths[pane], { offset: state.listOffsets[pane], limit: LIST_PAGE_SIZE })
   const stagedEntries = (pane = state.activePane) => currentEntries(pane).filter((entry) => state.staged[pane].has(entry.id))
-  const visibleRows = () => visibleRowCount(renderer.terminalHeight || 24)
+  // One layout source for app and renderer alike (P2-17): the app's cursor
+  // bookkeeping must agree with the rows the renderer actually draws.
+  const visibleRows = () => visiblePaneRows(viewportOf(renderer.terminalWidth || 80, renderer.terminalHeight || 24))
 
   function render(): void {
     if (disposed) return
     syncQueue()
+    refreshConsentTakenNames()
     renderApp({
       renderer,
       state,
       mode,
       filesystem,
-      peerService,
       receiveDestinations,
       peers,
       favorites: peerService.favorites(),
       queue: state.transferQueue,
-      real: mode === "real" && dependencies.real ? { bindAddr: dependencies.real.bindAddr, tcpPort: dependencies.real.tcpPort } : null,
+      real: mode === "real" && dependencies.real ? { bindAddr: dependencies.real.bindAddr, tcpPort: dependencies.real.tcpPort, receiving } : null,
+      consentTakenNames,
       actions: {
         command,
         selectEntry(pane, index) {
@@ -225,14 +258,18 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           render()
         },
         scrollPane(pane, direction) {
+          // The wheel scrolls the viewport (~3 rows per tick), not the
+          // cursor (P2-14); the cursor is only clamped back into view.
           state.activePane = pane
-          state.cursors[pane] = stepCursor(state.cursors[pane], direction === "down" ? 1 : -1, currentEntries(pane).length)
-          keepCursorVisible(pane)
+          const entries = currentEntries(pane)
+          const rows = visibleRows()
+          const maxOffset = Math.max(0, entries.length - rows)
+          const next = clamp(state.scrollOffsets[pane] + (direction === "down" ? 3 : -3), 0, maxOffset)
+          state.scrollOffsets[pane] = next
+          if (state.cursors[pane] < next) state.cursors[pane] = next
+          if (state.cursors[pane] >= next + rows) state.cursors[pane] = next + rows - 1
+          state.cursors[pane] = clamp(state.cursors[pane], 0, Math.max(0, entries.length - 1))
           animateFocus()
-          render()
-        },
-        selectConsentFile(index) {
-          state.selectedConsentFile = clamp(index, 0, Math.max(0, (state.request?.files.length ?? 1) - 1))
           render()
         },
         toggleConsentFile(index) {
@@ -445,8 +482,34 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       return
     }
     const entries = currentEntries()
-    state.cursors[state.activePane] = stepCursor(state.cursors[state.activePane], delta, entries.length)
-    keepCursorVisible(state.activePane)
+    const pane = state.activePane
+    const cursor = state.cursors[pane]
+    // Page turns (P1-23): a single step past either end of the loaded window
+    // loads the adjacent page when the directory has one.
+    if (delta === 1 && cursor >= entries.length - 1 && entries.length > 0) {
+      const total = filesystem.listTotal(pane, state.paths[pane])
+      if (state.listOffsets[pane] + entries.length < total) {
+        state.listOffsets[pane] += LIST_PAGE_SIZE
+        state.cursors[pane] = 0
+        state.scrollOffsets[pane] = 0
+        keepCursorVisible(pane)
+        animateFocus()
+        render()
+        return
+      }
+    }
+    if (delta === -1 && cursor <= 0 && state.listOffsets[pane] > 0) {
+      state.listOffsets[pane] = Math.max(0, state.listOffsets[pane] - LIST_PAGE_SIZE)
+      const previous = currentEntries(pane)
+      state.cursors[pane] = Math.max(0, previous.length - 1)
+      state.scrollOffsets[pane] = 0
+      keepCursorVisible(pane)
+      animateFocus()
+      render()
+      return
+    }
+    state.cursors[pane] = stepCursor(state.cursors[pane], delta, entries.length)
+    keepCursorVisible(pane)
     animateFocus()
     render()
   }
@@ -486,6 +549,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.paths[state.activePane] = `${state.paths[state.activePane].replace(/\/$/, "")}/${entry.name.replace(/\/$/, "")}`
     state.cursors[state.activePane] = 0
     state.scrollOffsets[state.activePane] = 0
+    state.listOffsets[state.activePane] = 0
     state.status = `Opened ${mode === "real" ? "folder" : "mock folder"} ${entry.name}`
     render()
   }
@@ -509,6 +573,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.paths[state.activePane] = filesystem.parentPath(current)
     state.cursors[state.activePane] = 0
     state.scrollOffsets[state.activePane] = 0
+    state.listOffsets[state.activePane] = 0
     state.status = mode === "real" ? "Moved to parent folder" : "Moved to parent mock folder"
     render()
   }
@@ -521,6 +586,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     fs.setShowHidden(showHiddenFiles)
     state.cursors.local = 0
     state.scrollOffsets.local = 0
+    state.listOffsets.local = 0
     state.status = showHiddenFiles ? "Showing hidden files · . hides them" : "Hiding hidden files · . shows them"
     render()
   }
@@ -530,6 +596,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     state.activePane = "local"
     state.cursors.local = 0
     state.scrollOffsets.local = 0
+    state.listOffsets.local = 0
     state.status = "Moved to your home folder"
     render()
   }
@@ -694,6 +761,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         openFavorites(); return
       case "queue": setScreen("queue"); return
       case "help": setScreen("help"); return
+      case "toggle-receive": toggleReceive(); return
       case "toggle-current": toggleCurrentEntry(); return
       case "pane-local": changePane("local"); return
       case "pane-remote": changePane("remote"); return
@@ -780,15 +848,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         return
       }
       default:
-        if (name.startsWith("favorite-open:")) {
-          // Mock-only screen; unreachable in real mode (favorites are empty
-          // there), but gate defensively like the other mock commands.
-          if (mode === "real") return
-          const peerId = name.slice("favorite-open:".length)
-          const index = peers.findIndex((item) => item.id === peerId)
-          if (index >= 0) state.peerIndex = index
-          setScreen("peer")
-        }
+        return
     }
   }
 
@@ -839,6 +899,9 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         }
         openFavorites(); return
       case "t": setScreen("queue"); return
+      case "l":
+        if (mode === "real") { command("toggle-receive"); return }
+        return
       case "?": setScreen("help"); return
       default: return
     }
@@ -1024,6 +1087,30 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
   }
 
+  // Transfer progress arrives per 64 KiB chunk; a full tree rebuild per chunk
+  // is the P2-4 render cost. Progress renders are throttled to ~10 Hz with a
+  // trailing flush, so the final progress state always lands. Completion and
+  // status renders elsewhere stay unthrottled.
+  const PROGRESS_RENDER_INTERVAL_MS = 100
+  let lastProgressRenderAt = 0
+  let progressRenderTimer: ReturnType<typeof setTimeout> | null = null
+  function renderProgress(): void {
+    const now = Date.now()
+    const elapsed = now - lastProgressRenderAt
+    if (elapsed >= PROGRESS_RENDER_INTERVAL_MS) {
+      lastProgressRenderAt = now
+      renderSafely()
+      return
+    }
+    if (progressRenderTimer === null) {
+      progressRenderTimer = setTimeout(() => {
+        progressRenderTimer = null
+        lastProgressRenderAt = Date.now()
+        renderSafely()
+      }, PROGRESS_RENDER_INTERVAL_MS - elapsed)
+    }
+  }
+
   /** Remove the parked consent prompt and unpark its session with a decline. */
   function dropParkedConsent(): void {
     const parked = realConsent
@@ -1177,7 +1264,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         signal: session.aborter.signal,
         onProgress: (_index, fileName, bytesReceived, fileBytes) => {
           state.status = `Receiving ${fileName} · ${Math.round((bytesReceived / Math.max(1, fileBytes)) * 100)}%`
-          renderSafely()
+          renderProgress()
         },
       })
       const landed = received.files[0] ? dirname(received.files[0].path) : session.destination ?? real.receiveDirectory
@@ -1271,6 +1358,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
         alias: real.alias,
         peerId: real.announcedPeerId,
         tcpPort: real.tcpPort,
+        discoveryPort: real.discoveryPort,
         events: {
           onError: (error: Error) => {
             state.status = `Discovery: ${error.message}`
@@ -1290,24 +1378,36 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       address === null ? null : real.discovery.listPeers().find((item) => item.address === address)?.alias ?? null
 
     // One session at a time (per the budget). A failure in one session never
-    // ends the loop; only a listener-level failure does.
-    const receiveLoop = async (): Promise<void> => {
-      for await (const hs of real.listener.accept()) {
-        if (disposed) break
-        try {
-          await track(receiveSession(hs, real, claimedAlias))
-        } catch (error) {
-          state.status = `Receive failed: ${errorText(error)}`
-          renderSafely()
+    // ends the loop; only a listener-level failure does. The loop is
+    // restartable so the receive toggle (P1-16) can bind a fresh listener
+    // after a stop.
+    activeListener = real.listener
+    const startReceiveLoop = (listener: NoiseListener): void => {
+      const receiveLoop = async (): Promise<void> => {
+        for await (const hs of listener.accept()) {
+          if (disposed) break
+          try {
+            await track(receiveSession(hs, real, claimedAlias))
+          } catch (error) {
+            state.status = `Receive failed: ${errorText(error)}`
+            renderSafely()
+          }
         }
       }
+      void receiveLoop().catch((error: unknown) => {
+        // A deliberate stop ends the generator without throwing; only a
+        // genuine listener failure lands here while still receiving.
+        if (!receiving || disposed) return
+        // Listener-level failure: surface it instead of going silently deaf.
+        if (realConsent) dropParkedConsent()
+        state.status = `Receive loop failed: ${errorText(error)}`
+        renderSafely()
+      })
     }
-    void receiveLoop().catch((error: unknown) => {
-      // Listener-level failure: surface it instead of going silently deaf.
-      if (realConsent) dropParkedConsent()
-      state.status = `Receive loop failed: ${errorText(error)}`
-      renderSafely()
-    })
+    restartReceiveLoop = () => {
+      if (activeListener) startReceiveLoop(activeListener)
+    }
+    startReceiveLoop(real.listener)
   }
 
   /** Park the SAS gate for one send: resolves true only when the user confirms the code (P0-1). */
@@ -1350,6 +1450,50 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
       const id = fileList.find((file) => file.name === outcome.name)?.path
       if (id) state.staged.local.delete(id)
     }
+  }
+
+  /**
+   * Receive on/off toggle (P1-16). Off closes the listener: new connections
+   * are refused, while a session already accepted runs to completion (its
+   * channel belongs to the session, not the listener). On binds a fresh
+   * listener on the same address/port, still governed by the bundle's
+   * lifetime aborter so shutdown semantics are unchanged. Default behaviour
+   * is untouched: the app starts out listening.
+   */
+  function toggleReceive(): void {
+    if (mode !== "real" || !dependencies.real) return
+    const real = dependencies.real
+    if (receiving) {
+      receiving = false
+      const listener = activeListener
+      activeListener = null
+      if (listener) void listener.close().catch(() => undefined)
+      state.status = "Not listening · new incoming transfers are refused · l resumes listening"
+      logEvent("receive-off")
+      render()
+      return
+    }
+    receiving = true
+    state.status = "Starting listener…"
+    render()
+    void listenNoise({ host: real.bindAddr, port: real.tcpPort, signal: real.aborter.signal })
+      .then((listener) => {
+        if (disposed || !receiving) {
+          void listener.close().catch(() => undefined)
+          return
+        }
+        activeListener = listener
+        restartReceiveLoop?.()
+        state.status = `Listening on [${real.bindAddr}]:${real.tcpPort} · l stops listening`
+        logEvent("receive-on", `${real.bindAddr}:${real.tcpPort}`)
+        renderSafely()
+      })
+      .catch((error: unknown) => {
+        receiving = false
+        state.status = `Could not start listening: ${errorText(error)} · l retries`
+        logEvent("receive-on-failed", errorText(error))
+        renderSafely()
+      })
   }
 
   /** Cancel key (Esc/x) for a real send: rejects a parked SAS, or aborts the transfer. */
@@ -1449,7 +1593,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
           const pct = Math.round((bytesSent / Math.max(1, fileBytes)) * 100)
           state.status = `Sending ${fileName} (${fileIndex + 1}/${fileList.length}) · ${pct}%`
           record.progress = Math.round(((fileIndex + pct / 100) / fileList.length) * 100)
-          renderSafely()
+          renderProgress()
         },
       })
       // Per-file outcomes: "Sent" is only true when the receiver acked each file (P0-2).
@@ -1516,9 +1660,17 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     reconcileTimers()
   }
 
+  /** A resize can strand the cursor outside the visible window (P2-13):
+   *  clamp both panes' windows to the cursor before repainting. */
+  function onResize(): void {
+    keepCursorVisible("local")
+    keepCursorVisible("remote")
+    render()
+  }
+
   renderer.useMouse = true
   renderer.keyInput.on("keypress", handleKey)
-  renderer.on(CliRenderEvents.RESIZE, render)
+  renderer.on(CliRenderEvents.RESIZE, onResize)
   renderer.on(CliRenderEvents.BLUR, onBlur)
   renderer.on(CliRenderEvents.FOCUS, onFocus)
 
@@ -1536,6 +1688,10 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   function dispose(): Promise<void> {
     if (disposing) return disposing
     disposed = true
+    if (progressRenderTimer !== null) {
+      clearTimeout(progressRenderTimer)
+      progressRenderTimer = null
+    }
     if (mode === "real" && dependencies.real) {
       // Aborting the listener signal unparks the accept() generator so the
       // receive loop can exit.
@@ -1560,7 +1716,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
     }
     clock.dispose()
     renderer.keyInput.off("keypress", handleKey)
-    renderer.off(CliRenderEvents.RESIZE, render)
+    renderer.off(CliRenderEvents.RESIZE, onResize)
     renderer.off(CliRenderEvents.BLUR, onBlur)
     renderer.off(CliRenderEvents.FOCUS, onFocus)
     disposing = settleWithin(inFlight, DISPOSE_SETTLE_MS)

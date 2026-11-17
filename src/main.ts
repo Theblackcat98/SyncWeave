@@ -60,6 +60,9 @@ Flags (each takes --flag VALUE or --flag=VALUE):
   --alias NAME        Display name announced to peers (default: syncweave-XXXX,
                       random per run).
   --port N            TCP port for the Noise listener (default: 24816).
+  --discovery-port N  UDP port for multicast discovery (default: 24817).
+                      Instances that must not discover each other need
+                      distinct discovery ports as well as distinct TCP ports.
   --bind ADDR         Local address to bind. Default: :: (IPv6, falling back to
                       0.0.0.0 when IPv6 is unavailable). An explicit --bind never falls back.
   --peer HOST:PORT    Manual peer, repeatable, IP address only. Fallback when
@@ -83,7 +86,7 @@ if (cli.showVersion) {
   process.exit(0)
 }
 
-const { realMode, alias, tcpPort, manualPeers } = cli
+const { realMode, alias, tcpPort, discoveryPort, manualPeers } = cli
 
 if (!realMode) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false })
@@ -189,6 +192,7 @@ if (!realMode) {
     discovery,
     alias,
     tcpPort,
+    discoveryPort,
     receiveDirectory,
     aborter,
     startupWarning: startupNotice,
