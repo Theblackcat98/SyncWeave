@@ -19,7 +19,7 @@ import { receiveToFile, sanitizePeerBasename } from "./safe-receive-sink.js"
 
 /**
  * Phase 2 direct-transfer protocol, version 2 (see docs/networking.md
- * "Protocol v2" and docs/decisions.md).
+ * "Protocol v2" and docs/STATE_OF_TRUTH.md).
  *
  * Wire flow (all application frames travel inside the Noise-encrypted
  * channel; handshake messages are Noise, not application frames):

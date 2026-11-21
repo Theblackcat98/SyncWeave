@@ -131,7 +131,7 @@ laptop1.
 - [ ] Update the "Unverified" list in [networking.md](networking.md) with what you
       have now verified.
 - [ ] Record the run in the table below, and update
-      [release-gates.md](release-gates.md) if a gate changed.
+      [STATE_OF_TRUTH.md](STATE_OF_TRUTH.md) if a gate changed.
 
 ## Run record
 

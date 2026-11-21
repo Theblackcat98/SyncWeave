@@ -1,5 +1,8 @@
 # SyncWeave remediation plan
 
+> **Superseded as a status record by [STATE_OF_TRUTH.md](STATE_OF_TRUTH.md) (2026-11-09).** This plan remains as the historical 2026-10-12 audit; item statuses live in the state of truth. One amendment was made in place: P0-1's display demand (fingerprint + SAS stands, cluster C1).
+
+
 Audit date: 2026-10-12 · Audited commit: `a87d307` · Bun 1.4.2 / 1.4.3
 
 This document lists everything found wrong with SyncWeave on the way to a
@@ -135,8 +138,10 @@ one at a time.
      sent.
   2. Sign a tagged message: `"syncweave-id-proof-v2" ‖ role ‖ version ‖ H`.
      Add a Noise prologue. Reject a proof whose Peer ID equals our own.
-  3. Never label a discovery-sourced ID as "verified". Show the full Peer ID,
-     grouped, on send-review and consent. Mark the alias as *claimed*. Flag
+  3. Never label a discovery-sourced ID as "verified". Show the SAS and the
+     peer's 16-character fingerprint on send-review and consent. *(Amended
+     2026-11-09, cluster C1: fingerprint + SAS is the intended form; the
+     original text demanded the full grouped Peer ID.)* Mark the alias as *claimed*. Flag
      duplicate aliases, and flag a known alias that changes ID or address.
   4. Manual peers: accept `--peer host:port#<peerId>`, or require the SAS
      step. If TOFU stays, implement real pinning and record the decision in

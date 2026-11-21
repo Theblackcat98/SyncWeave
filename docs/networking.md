@@ -4,7 +4,7 @@ How real mode (`--real`) moves files, what a receiver and a sender see, and what
 is still unverified. This describes the target behaviour for the 0.1.0
 remediation round. Where the code does not yet do this, the gap is listed in
 [known-limitations.md](known-limitations.md). Decisions and their status are in
-[decisions.md](decisions.md).
+[STATE_OF_TRUTH.md](STATE_OF_TRUTH.md).
 
 ## Transports
 
@@ -178,4 +178,4 @@ Nothing in this section has been run on real hardware yet.
 - Interface change, sleep and wake, and address change.
 - macOS: the CI job exists but has not run.
 
-Release gates and their evidence are tracked in [release-gates.md](release-gates.md).
+Release gates and their evidence are tracked in [STATE_OF_TRUTH.md](STATE_OF_TRUTH.md).
