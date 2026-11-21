@@ -1,7 +1,7 @@
 // Shared mount helpers for the ui-* frame tests. Not a test file itself.
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
 import { createSyncWeaveApp, type AppDependencies, type RealTransport, type SyncWeaveApp } from "../app.js"
-import type { ConsentRequest, MockPeer } from "../domain.js"
+import type { ConsentRequest, Peer } from "../domain.js"
 import { MockFileSystemService } from "../services/mock-filesystem.js"
 import { MockPeerService } from "../services/mock-peer-service.js"
 import { mockDestinations, MockTransferService } from "../services/mock-transfer-service.js"
@@ -72,7 +72,7 @@ export async function unmountAll(): Promise<void> {
 }
 
 export function consentRequest(overrides: Partial<ConsentRequest> = {}, fileCount = 3): ConsentRequest {
-  const peer: MockPeer = { id: "zAAA", name: "Lab laptop", host: "192.168.1.20", port: 24816, fingerprint: "zAAA", online: true }
+  const peer: Peer = { id: "zAAA", name: "Lab laptop", host: "192.168.1.20", port: 24816, fingerprint: "zAAA", online: true }
   return {
     id: "ui-test",
     mode: "incoming",

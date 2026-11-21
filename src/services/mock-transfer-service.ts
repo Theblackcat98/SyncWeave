@@ -1,4 +1,4 @@
-import type { ConsentFile, ConsentMode, ConsentRequest, MockPeer, Pane, TransferRecord } from "../domain.js"
+import type { ConsentFile, ConsentMode, ConsentRequest, Peer, Pane, TransferRecord } from "../domain.js"
 import type { TransferService } from "./ports.js"
 
 export const mockDestinations = ["~/Downloads/SyncWeave", "~/Documents/Shared", "~/Desktop/Inbox"] as const
@@ -7,7 +7,7 @@ export class MockTransferService implements TransferService {
   private readonly records: TransferRecord[] = []
   private sequence = 0
 
-  createRequest(mode: ConsentMode, peer: MockPeer, files: Array<Pick<ConsentFile, "id" | "name" | "bytes">>, sourcePane?: Pane): ConsentRequest {
+  createRequest(mode: ConsentMode, peer: Peer, files: Array<Pick<ConsentFile, "id" | "name" | "bytes">>, sourcePane?: Pane): ConsentRequest {
     return {
       id: `request-${++this.sequence}`,
       mode,

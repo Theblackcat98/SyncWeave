@@ -1,5 +1,5 @@
 import { BoxRenderable, MouseButton, RGBA, type CliRenderer } from "@opentui/core"
-import type { AppMode, AppState, ConsentFile, MockEntry, MockPeer, Pane, Screen, TransferRecord } from "../domain.js"
+import type { AppMode, AppState, ConsentFile, FileEntry, Peer, Pane, Screen, TransferRecord } from "../domain.js"
 import { previewSavedName } from "../services/safe-receive-sink.js"
 import { formatBytes } from "../domain.js"
 import type { FileSystemService, PeerService } from "../services/ports.js"
@@ -37,7 +37,7 @@ export interface RenderData {
   filesystem: FileSystemService
   peerService: PeerService
   receiveDestinations: readonly string[]
-  peers: MockPeer[]
+  peers: Peer[]
   favorites: ReturnType<PeerService["favorites"]>
   queue: TransferRecord[]
   actions: RenderActions
@@ -47,7 +47,7 @@ export interface RenderData {
 interface RenderContext extends RenderData {
   vp: Viewport
   /** One directory listing per pane per render (P2-4). */
-  list(pane: Pane): MockEntry[]
+  list(pane: Pane): FileEntry[]
 }
 
 const SAS_BOX_ROWS = 5
@@ -97,8 +97,8 @@ export function renderApp(data: RenderData): void {
 }
 
 /** Each render reads a pane's directory once and reuses the result. */
-function listingCache(filesystem: FileSystemService, state: AppState): (pane: Pane) => MockEntry[] {
-  const cache = new Map<Pane, MockEntry[]>()
+function listingCache(filesystem: FileSystemService, state: AppState): (pane: Pane) => FileEntry[] {
+  const cache = new Map<Pane, FileEntry[]>()
   return (pane) => {
     let entries = cache.get(pane)
     if (!entries) {

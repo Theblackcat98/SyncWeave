@@ -6,20 +6,20 @@
  * interfaces with truthful empty behavior; real transfers feed
  * state.transferQueue directly (see app.ts).
  */
-import type { ConsentFile, ConsentMode, ConsentRequest, FavoriteDestination, MockPeer, Pane, TransferRecord } from "../domain.js"
+import type { ConsentFile, ConsentMode, ConsentRequest, FavoriteDestination, Peer, Pane, TransferRecord } from "../domain.js"
 import type { PeerService, TransferService } from "./ports.js"
 
 export class NullPeerService implements PeerService {
-  discover(): MockPeer[] {
+  discover(): Peer[] {
     return []
   }
-  pulse(): MockPeer[] {
+  pulse(): Peer[] {
     return []
   }
   favorites(): FavoriteDestination[] {
     return []
   }
-  toggleFavorite(_peer: MockPeer): boolean {
+  toggleFavorite(_peer: Peer): boolean {
     return false
   }
 }
@@ -27,7 +27,7 @@ export class NullPeerService implements PeerService {
 export class NullTransferService implements TransferService {
   createRequest(
     _mode: ConsentMode,
-    _peer: MockPeer,
+    _peer: Peer,
     _files: Array<Pick<ConsentFile, "id" | "name" | "bytes">>,
     _sourcePane?: Pane,
   ): ConsentRequest {

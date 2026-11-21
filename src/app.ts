@@ -1,7 +1,7 @@
 import { CliRenderEvents, type CliRenderer, type KeyEvent } from "@opentui/core"
 import { homedir } from "node:os"
 import { dirname } from "node:path"
-import type { AppMode, AppState, MockPeer, Pane, Screen, TransferRecord } from "./domain.js"
+import type { AppMode, AppState, Peer, Pane, Screen, TransferRecord } from "./domain.js"
 import { OTHER_PANE } from "./domain.js"
 import type { FileSystemService, PeerService, TransferService } from "./services/ports.js"
 import { listenNoise, type HandshakeResult } from "./services/transport.js"
@@ -69,7 +69,7 @@ function remoteAddressOf(hs: HandshakeResult): string | null {
 }
 
 /** Change detector for the peer list (identity, name and address). */
-function peerSignature(list: readonly MockPeer[]): string {
+function peerSignature(list: readonly Peer[]): string {
   return list.map((p) => `${p.id}\u0000${p.name}\u0000${p.host}\u0000${p.port}`).join("\n")
 }
 
@@ -164,7 +164,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   let receiveDestinations: string[] = [...dependencies.receiveDestinations]
   // In real mode the peer list is populated from UDP-multicast discovery
   // (plus manual entries); in mock mode it comes from the mock service.
-  let peers: MockPeer[] = mode === "real" ? [] : peerService.discover()
+  let peers: Peer[] = mode === "real" ? [] : peerService.discover()
   // Real mode: the selected peer is tracked by ID, so a reordered or
   // re-announced list never silently retargets a send (P1-39).
   let selectedPeerId: string | null = null
@@ -193,7 +193,7 @@ export function createSyncWeaveApp(renderer: CliRenderer, dependencies: AppDepen
   const syncQueue = () => {
     if (mode !== "real") state.transferQueue = transferService.queue()
   }
-  const peer = (): MockPeer | undefined =>
+  const peer = (): Peer | undefined =>
     mode === "real"
       ? peers.find((item) => item.id === selectedPeerId)
       : peers[state.peerIndex % Math.max(1, peers.length)]
