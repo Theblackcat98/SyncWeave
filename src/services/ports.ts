@@ -19,6 +19,12 @@ export interface FileSystemService {
   listTotal?(pane: Pane, path: string): number | undefined
   /** Last list() error for this path (real fs only); null if none. */
   listError?(pane: Pane, path: string): string | null
+  /**
+   * Resolve one staged entry ID to its entry without listing its folder
+   * (real fs only; staged IDs there are absolute paths). Null when the
+   * entry no longer exists.
+   */
+  describe?(id: string): MockEntry | null
 }
 
 export interface PeerService {

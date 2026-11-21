@@ -447,7 +447,15 @@ function renderSendReview(parent: BoxRenderable, ctx: RenderContext): void {
   const realMode = mode === "real"
   // Real mode always sends from the Local staged set, regardless of focus.
   const sendPane = realMode ? "local" : state.activePane
-  const files = ctx.list(sendPane).filter((entry) => state.staged[sendPane].has(entry.id))
+  // The review lists every staged file, including files staged in other
+  // folders: where the filesystem resolves staged IDs directly (the real
+  // one), gather from the staged set instead of the on-screen listing.
+  const files = realMode && ctx.filesystem.describe
+    ? [...state.staged[sendPane]].flatMap((id) => {
+        const entry = ctx.filesystem.describe!(id)
+        return entry ? [entry] : []
+      })
+    : ctx.list(sendPane).filter((entry) => state.staged[sendPane].has(entry.id))
   const peer = peers[state.peerIndex % Math.max(1, peers.length)]
   const inner = cardInnerWidth(vp)
   const sas = state.sendSasConfirm

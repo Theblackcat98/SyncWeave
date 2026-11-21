@@ -8,7 +8,7 @@
 import { afterEach, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
 import { createSyncWeaveApp, SAS_CONFIRM_ARM_MS, type RealTransport, type SyncWeaveApp } from "../app.js"
 import type { DiscoveredPeer, DiscoveryService } from "../services/discovery.js"
@@ -55,7 +55,11 @@ async function makeInstance(label: string, files: Record<string, string>, discov
   const receiveDir = join(base, "Downloads")
   await mkdir(root)
   await mkdir(receiveDir, { mode: 0o700 })
-  for (const [name, body] of Object.entries(files)) await writeFile(join(root, name), body)
+  for (const [name, body] of Object.entries(files)) {
+    const target = join(root, name)
+    if (name.includes("/")) await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, body)
+  }
   const listener = await listenNoise({ host: "127.0.0.1", port: 0 })
   const announcedPeerId = generateEphemeralIdentity().peerId
   const discovery = {
@@ -156,6 +160,56 @@ test("sends to a discovered peer after the SAS is confirmed on both screens (R1)
   expect(sender.app.state.staged.local.size).toBe(0)
   expect(sender.app.state.transferQueue.filter((r) => r.direction === "outgoing" && r.status === "complete")).toHaveLength(1)
   expect(receiver.app.state.transferQueue.filter((r) => r.direction === "incoming" && r.status === "complete")).toHaveLength(1)
+}, TEST_TIMEOUT_MS)
+
+test("staging across folders: a send includes files staged in other folders (P1-43)", async () => {
+  const { sender, receiver } = await makePair({
+    "alpha/a1.txt": "from alpha\n",
+    "beta/b1.txt": "from beta\n",
+  })
+  // Root listing is name-sorted: alpha, beta. Enter alpha, stage a1.txt.
+  await press(sender, ENTER)
+  expect(sender.app.state.paths.local.endsWith("alpha")).toBe(true)
+  await press(sender, SPACE)
+  expect(sender.app.state.staged.local.size).toBe(1)
+  // Back to root, enter beta, stage b1.txt.
+  await press(sender, "BACKSPACE")
+  await press(sender, DOWN)
+  await press(sender, ENTER)
+  expect(sender.app.state.paths.local.endsWith("beta")).toBe(true)
+  await press(sender, SPACE)
+  expect(sender.app.state.staged.local.size).toBe(2)
+  // Review and send.
+  await press(sender, "s")
+  expect(sender.app.state.screen).toBe("send-review")
+  await press(sender, ENTER)
+  await waitFor("sender SAS prompt", () => sender.app.state.sendSasConfirm)
+  await confirmSas(sender)
+  const consent = await waitFor("receiver consent", () => receiver.app.state.request)
+  expect(consent.files.map((f) => f.name).sort()).toEqual(["a1.txt", "b1.txt"])
+  await press(receiver, ENTER)
+  await waitFor("sender finished", () => !sender.app.state.sending && sender.app.state.screen === "workspace")
+  expect(await readFile(join(receiver.receiveDir, "a1.txt"), "utf8")).toBe("from alpha\n")
+  expect(await readFile(join(receiver.receiveDir, "b1.txt"), "utf8")).toBe("from beta\n")
+  expect(sender.app.state.staged.local.size).toBe(0)
+}, TEST_TIMEOUT_MS)
+
+test("Shift+A clears only the current folder's staging (staging scope)", async () => {
+  const { sender } = await makePair({
+    "alpha/a1.txt": "from alpha\n",
+    "beta/b1.txt": "from beta\n",
+  })
+  // Stage a1.txt in alpha, then b1.txt in beta.
+  await press(sender, ENTER)
+  await press(sender, SPACE)
+  await press(sender, "BACKSPACE")
+  await press(sender, DOWN)
+  await press(sender, ENTER)
+  await press(sender, SPACE)
+  expect(sender.app.state.staged.local.size).toBe(2)
+  // Shift+A in beta clears beta's staging only; alpha's file stays staged.
+  await press(sender, "A")
+  expect([...sender.app.state.staged.local]).toEqual([join(sender.root, "alpha", "a1.txt")])
 }, TEST_TIMEOUT_MS)
 
 test("a double Enter sends once", async () => {
