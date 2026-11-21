@@ -524,3 +524,74 @@ test("e2e: destinationDirectory as a function is resolved per file (consent-scre
     await cleanup(h)
   }
 }, 30_000)
+
+test("e2e: two senders run parallel sessions to one listener, independently (P1-44)", async () => {
+  const h = await startHarness()
+  const senderDirB = await makeTempDir("sw-send-b-")
+  const destDirB = await makeTempDir("sw-dest-b-")
+  try {
+    const pA = await writeTestFile(h.senderDir, "a.bin", 200_000) // multi-chunk
+    const pB = await writeTestFile(senderDirB, "b.bin", 150_000)
+    const senderA = generateEphemeralIdentity()
+    const senderB = generateEphemeralIdentity()
+
+    // Concurrency barrier: neither receiver answers its transfer request
+    // until BOTH sessions have presented one. If the transport serialized
+    // sessions, the first receiver would wait forever and this test would
+    // time out — so completing at all proves the sessions overlapped.
+    let arrived = 0
+    let releaseBarrier!: () => void
+    const bothArrived = new Promise<void>((resolve) => (releaseBarrier = resolve))
+    const receivers = [h.destDir, destDirB].map((destinationDirectory) =>
+      (async () => {
+        const hs = await h.nextChannel()
+        return receiveFiles({
+          channel: hs.channel,
+          handshakeHash: hs.handshakeHash,
+          identity: generateEphemeralIdentity(),
+          destinationDirectory,
+          onTransferRequest: async (req) => {
+            arrived += 1
+            if (arrived === 2) releaseBarrier()
+            await bothArrived
+            return req.files
+          },
+        })
+      })(),
+    )
+
+    const [sendA, sendB] = await Promise.all([
+      sendFiles({ host: "127.0.0.1", port: h.port, files: [{ path: pA, name: "a.bin" }], identity: senderA }),
+      sendFiles({ host: "127.0.0.1", port: h.port, files: [{ path: pB, name: "b.bin" }], identity: senderB }),
+    ])
+    const received = await Promise.all(receivers)
+    expect(arrived).toBe(2)
+
+    for (const send of [sendA, sendB]) {
+      expect(send.outcomes).toHaveLength(1)
+      expect(send.outcomes[0]!.ok).toBe(true)
+    }
+    // Pair each send with its receive session by SAS: the two sessions must
+    // not have crossed identities, files, or acknowledgements.
+    expect(sendA.sas).not.toBe(sendB.sas)
+    const sources = new Map([
+      [sendA.sas, { sender: senderA, path: pA, name: "a.bin" }],
+      [sendB.sas, { sender: senderB, path: pB, name: "b.bin" }],
+    ])
+    expect(received.map((r) => r.sas).sort()).toEqual([sendA.sas, sendB.sas].sort())
+    for (const r of received) {
+      const source = sources.get(r.sas)!
+      expect(r.verifiedPeerId).toBe(source.sender.peerId)
+      expect(r.files).toHaveLength(1)
+      expect(r.files[0]!.name).toBe(source.name)
+      expect((await readFile(r.files[0]!.path)).equals(await readFile(source.path))).toBe(true)
+    }
+    // Each destination holds exactly its own session's file.
+    expect(await readdir(h.destDir)).toEqual([received[0]!.files[0]!.name])
+    expect(await readdir(destDirB)).toEqual([received[1]!.files[0]!.name])
+  } finally {
+    await rm(senderDirB, { recursive: true, force: true })
+    await rm(destDirB, { recursive: true, force: true })
+    await cleanup(h)
+  }
+}, 30_000)

@@ -299,3 +299,75 @@ test("P1-45: receiver closes before FILE_RESULT → sender treats it as failure,
     await cleanup(h)
   }
 }, 30_000)
+
+test("P1-45: destination fills up mid-stream (injected ENOSPC) → sender does not report success", async () => {
+  // Inject a real write failure: the destination is a 256 KiB tmpfs, so the
+  // sink's writes fail with ENOSPC partway through a 512 KiB file — the
+  // "disk full on the receiver" case no directory-permission trick can fake.
+  // Mounting needs privileges (root / CAP_SYS_ADMIN); where they are missing
+  // the scenario is skipped, like the read-only-dir case under root.
+  const mountPoint = await makeTempDir("sw-full-")
+  const mount = Bun.spawn(["mount", "-t", "tmpfs", "-o", "size=256k", "tmpfs", mountPoint], { stdout: "ignore", stderr: "pipe" })
+  if ((await mount.exited) !== 0) {
+    console.log("skip: cannot mount a tmpfs (needs root / CAP_SYS_ADMIN)")
+    await rm(mountPoint, { recursive: true, force: true })
+    return
+  }
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "big.bin", 512_000)
+    const senderIdentity = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+
+    const receiverDone: Promise<ReceiverSettlement> = (async () => {
+      const hs = await h.nextChannel()
+      try {
+        const result = await receiveFiles({
+          channel: hs.channel,
+          handshakeHash: hs.handshakeHash,
+          expectedPeerId: senderIdentity.peerId,
+          identity: receiverIdentity,
+          destinationDirectory: mountPoint,
+          onTransferRequest: async (req) => req.files,
+        })
+        return { ok: true as const, result }
+      } catch (error) {
+        return { ok: false as const, error }
+      }
+    })()
+
+    // The write failure must reach the sender as a failure — never a
+    // resolved send, never an ok outcome.
+    const sendErr = await sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "big.bin" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: senderIdentity,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(sendErr).not.toBeNull()
+
+    const r = await receiverDone
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.error).toBeInstanceOf(ReceiveAbortedError)
+      // Prove the abort was the injected write failure, not anything else:
+      // the ENOSPC from the full tmpfs is in the error's cause chain.
+      const chain: string[] = []
+      for (let e: unknown = r.error; e instanceof Error; e = (e as { cause?: unknown }).cause) {
+        chain.push(`${(e as { code?: string }).code ?? ""} ${e.message}`)
+      }
+      expect(chain.join(" | ")).toContain("ENOSPC")
+      expect((r.error as ReceiveAbortedError).receivedFiles).toHaveLength(0)
+    }
+    // Nothing was published under the file's final name.
+    expect((await readdir(mountPoint)).filter((n) => !n.startsWith(".syncweave-"))).toEqual([])
+  } finally {
+    await cleanup(h)
+    await Bun.spawn(["umount", mountPoint], { stdout: "ignore", stderr: "ignore" }).exited
+    await rm(mountPoint, { recursive: true, force: true })
+  }
+}, 30_000)

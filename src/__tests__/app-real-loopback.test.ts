@@ -30,6 +30,7 @@ interface Instance {
   base: string
   root: string
   receiveDir: string
+  altReceiveDir: string | null
   port: number
   announcedPeerId: string
   discoveryPeers: DiscoveredPeer[]
@@ -49,12 +50,14 @@ afterEach(async () => {
   }
 })
 
-async function makeInstance(label: string, files: Record<string, string>, discoveryPeers: DiscoveredPeer[] = []): Promise<Instance> {
+async function makeInstance(label: string, files: Record<string, string>, discoveryPeers: DiscoveredPeer[] = [], withAltDestination = false): Promise<Instance> {
   const base = await mkdtemp(join(tmpdir(), `app-real-${label}-`))
   const root = join(base, "local")
   const receiveDir = join(base, "Downloads")
+  const altReceiveDir = withAltDestination ? join(base, "AltDownloads") : null
   await mkdir(root)
   await mkdir(receiveDir, { mode: 0o700 })
+  if (altReceiveDir) await mkdir(altReceiveDir, { mode: 0o700 })
   for (const [name, body] of Object.entries(files)) await writeFile(join(root, name), body)
   const listener = await listenNoise({ host: "127.0.0.1", port: 0 })
   const announcedPeerId = generateEphemeralIdentity().peerId
@@ -79,19 +82,19 @@ async function makeInstance(label: string, files: Record<string, string>, discov
     filesystem: new RealFileSystemService(root),
     peerService: new NullPeerService(),
     transferService: new NullTransferService(),
-    receiveDestinations: [receiveDir],
+    receiveDestinations: altReceiveDir ? [receiveDir, altReceiveDir] : [receiveDir],
     mode: "real",
     real,
   })
   await setup.flush()
-  const instance: Instance = { label, base, root, receiveDir, port: listener.port, announcedPeerId, discoveryPeers, listener, setup, app }
+  const instance: Instance = { label, base, root, receiveDir, altReceiveDir, port: listener.port, announcedPeerId, discoveryPeers, listener, setup, app }
   instances.push(instance)
   return instance
 }
 
 /** A receiver, and a sender whose discovery list holds the receiver the way multicast would. */
-async function makePair(senderFiles: Record<string, string>): Promise<{ sender: Instance; receiver: Instance }> {
-  const receiver = await makeInstance("receiver", {})
+async function makePair(senderFiles: Record<string, string>, receiverAltDestination = false): Promise<{ sender: Instance; receiver: Instance }> {
+  const receiver = await makeInstance("receiver", {}, [], receiverAltDestination)
   const sender = await makeInstance("sender", senderFiles, [{
     peerId: receiver.announcedPeerId,
     alias: "receiver",
@@ -301,4 +304,34 @@ test("dispose resolves promptly while a consent prompt is parked", async () => {
   await receiver.app.dispose()
   expect(Date.now() - started).toBeLessThan(3_500)
   expect(receiver.app.state.request).toBeNull()
+}, TEST_TIMEOUT_MS)
+
+test("the consent destination picker chooses where the file lands; rename does not exist in real mode (P1-43)", async () => {
+  const { sender, receiver } = await makePair({ "pick.txt": "picked destination\n" }, true)
+  const altDir = receiver.altReceiveDir
+  expect(altDir).not.toBeNull()
+  await stageFirstAndReview(sender)
+  await press(sender, ENTER)
+  await waitFor("sender SAS prompt", () => sender.app.state.sendSasConfirm)
+  await confirmSas(sender)
+  await waitFor("receiver consent", () => receiver.app.state.request)
+
+  // Real mode has no consent rename: `r` only explains that files keep the
+  // sender's name, and the parked request is untouched.
+  await press(receiver, "r")
+  expect(receiver.app.state.status).toContain("keep the sender's name")
+  expect(receiver.app.state.request).not.toBeNull()
+
+  // The destination picker (`d`) cycles to the second destination.
+  expect(receiver.app.state.receiveDestinationIndex).toBe(0)
+  await press(receiver, "d")
+  expect(receiver.app.state.receiveDestinationIndex).toBe(1)
+  expect(receiver.app.state.status).toContain(altDir!)
+
+  await press(receiver, ENTER)
+  await waitFor("receiver saved", () => receiver.app.state.status.startsWith("Received"))
+  // The file landed in the picked destination, under its original name —
+  // and not in the default destination.
+  expect(await readFile(join(altDir!, "pick.txt"), "utf8")).toBe("picked destination\n")
+  expect(await stat(join(receiver.receiveDir, "pick.txt")).catch(() => null)).toBeNull()
 }, TEST_TIMEOUT_MS)

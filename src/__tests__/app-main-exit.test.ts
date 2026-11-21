@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { join } from "node:path"
+import { listenNoise } from "../services/transport.js"
 
 const MAIN = join(import.meta.dir, "..", "main.ts")
 
@@ -30,4 +31,17 @@ test("--real=maybe is rejected instead of starting mock mode", async () => {
 test("--help exits 0", async () => {
   const result = await run(["--help"])
   expect(result.code).toBe(0)
+}, 20_000)
+
+test("a port already in use exits 1 with the friendly EADDRINUSE message (P1-46)", async () => {
+  // Hold the port the way a first SyncWeave instance would.
+  const blocker = await listenNoise({ host: "127.0.0.1", port: 0 })
+  try {
+    const result = await run(["--real", "--bind", "127.0.0.1", "--port", String(blocker.port)])
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain(`port ${blocker.port} is already in use`)
+    expect(result.stderr).toContain("another SyncWeave instance is probably running")
+  } finally {
+    await blocker.close()
+  }
 }, 20_000)
