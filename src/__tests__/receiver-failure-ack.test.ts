@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { writeFileSync } from "node:fs"
-import { chmod, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -295,6 +295,69 @@ test("P1-45: receiver closes before FILE_RESULT → sender treats it as failure,
 
     const r = await receiverDone
     expect(r.ok).toBe(false)
+  } finally {
+    await cleanup(h)
+  }
+}, 30_000)
+
+test("P1-20/C2: a name taken mid-transfer is retried under the next collision name", async () => {
+  const h = await startHarness()
+  try {
+    const p1 = await writeTestFile(h.senderDir, "race.txt", 200_000)
+    const senderIdentity = generateEphemeralIdentity()
+    const receiverIdentity = generateEphemeralIdentity()
+    let planted = false
+
+    const receiverDone: Promise<ReceiverSettlement> = (async () => {
+      const hs = await h.nextChannel()
+      try {
+        const result = await receiveFiles({
+          channel: hs.channel,
+          handshakeHash: hs.handshakeHash,
+          expectedPeerId: senderIdentity.peerId,
+          identity: receiverIdentity,
+          destinationDirectory: h.destDir,
+          onTransferRequest: async (req) => req.files,
+          onProgress: () => {
+            if (!planted) {
+              planted = true
+              // The resolved destination name is won by someone else while
+              // the bytes are still streaming in. Before the C2 fix, the
+              // publish failed with E_EXISTS and the file was lost.
+              writeFileSync(join(h.destDir, "race.txt"), "someone else")
+            }
+          },
+        })
+        return { ok: true as const, result }
+      } catch (error) {
+        return { ok: false as const, error }
+      }
+    })()
+
+    const sendResult = await sendFiles({
+      host: "127.0.0.1",
+      port: h.port,
+      files: [{ path: p1, name: "race.txt" }],
+      expectedPeerId: receiverIdentity.peerId,
+      identity: senderIdentity,
+    })
+    expect(planted).toBe(true)
+
+    // The send succeeds and the acknowledgement names the collision name.
+    expect(sendResult.outcomes).toHaveLength(1)
+    expect(sendResult.outcomes[0]!.ok).toBe(true)
+    expect(sendResult.outcomes[0]!.finalName).toBe("race (1).txt")
+
+    const r = await receiverDone
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.result.files).toHaveLength(1)
+      expect(r.result.files[0]!.name).toBe("race (1).txt")
+    }
+    // The planted file is untouched and the received bytes arrived whole.
+    expect(await readFile(join(h.destDir, "race.txt"), "utf8")).toBe("someone else")
+    expect((await readFile(join(h.destDir, "race (1).txt"))).byteLength).toBe(200_000)
+    expect((await readdir(h.destDir)).sort()).toEqual(["race (1).txt", "race.txt"])
   } finally {
     await cleanup(h)
   }

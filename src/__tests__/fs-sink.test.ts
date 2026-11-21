@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, mock, test } from "bun:test"
@@ -9,10 +9,23 @@ import { afterEach, expect, mock, test } from "bun:test"
 // other call through to the real implementation.
 let unlinkFault: "none" | "always" | "once" = "none"
 let unlinkFaults = 0
+// Fail link() the way a filesystem without hard-link support does, and count
+// calls so tests can prove link support is probed only once per destination.
+let linkFault: "none" | "EXDEV" | "ENOTSUP" = "none"
+let linkCalls = 0
 mock.module("node:fs/promises", () => {
   const actual = require("node:fs/promises")
   return {
     ...actual,
+    link: async (src: unknown, dest: unknown) => {
+      linkCalls += 1
+      if (linkFault !== "none") {
+        const error = new Error(`${linkFault}: injected link failure`) as Error & { code: string }
+        error.code = linkFault
+        throw error
+      }
+      return actual.link(src, dest)
+    },
     unlink: async (path: unknown, ...rest: unknown[]) => {
       if (unlinkFault !== "none" && /\/\.syncweave-[^/]*\.partial$/.test(String(path))) {
         if (unlinkFault === "always" || unlinkFaults === 0) {
@@ -35,6 +48,8 @@ const directories: string[] = []
 afterEach(async () => {
   unlinkFault = "none"
   unlinkFaults = 0
+  linkFault = "none"
+  linkCalls = 0
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
@@ -194,6 +209,95 @@ test("previewSavedName returns exactly the basename the sink saves, before any c
     expect(preview).not.toBeNull()
     expect(saved.name).toBe(preview!)
   }
+})
+
+test("publishes via the exclusive-copy fallback when the filesystem has no hard links (EXDEV)", async () => {
+  const directory = await makeDirectory()
+  const bytes = new TextEncoder().encode("fallback payload\n".repeat(40))
+  linkFault = "EXDEV"
+
+  const result = await receiveToFile(once(bytes), optionsFor(directory, "copied.txt", bytes))
+  expect(result.name).toBe("copied.txt")
+  expect(result.bytes).toBe(bytes.byteLength)
+  expect(Array.from(await readFile(join(directory, "copied.txt")))).toEqual(Array.from(bytes))
+  // Same 0600 mode a hard-linked publish produces, and nothing is left behind.
+  expect((await stat(join(directory, "copied.txt"))).mode & 0o777).toBe(0o600)
+  expect(await readdir(directory)).toEqual(["copied.txt"])
+})
+
+test("the exclusive-copy fallback still refuses an existing name and a symlink, leaving targets unchanged", async () => {
+  const directory = await makeDirectory()
+  const original = new TextEncoder().encode("original")
+  await writeFile(join(directory, "taken.txt"), original)
+  const outsidePath = join(directory, "outside.txt")
+  const outsideBytes = new TextEncoder().encode("outside")
+  await writeFile(outsidePath, outsideBytes)
+  await symlink(outsidePath, join(directory, "linked.txt"))
+  linkFault = "ENOTSUP"
+
+  const incoming = new TextEncoder().encode("incoming")
+  await expect(receiveToFile(once(incoming), optionsFor(directory, "taken.txt", incoming))).rejects.toMatchObject({
+    code: "EEXIST",
+  })
+  await expect(receiveToFile(once(incoming), optionsFor(directory, "linked.txt", incoming))).rejects.toMatchObject({
+    code: "EEXIST",
+  })
+  expect(Array.from(await readFile(join(directory, "taken.txt")))).toEqual(Array.from(original))
+  expect(Array.from(await readFile(outsidePath))).toEqual(Array.from(outsideBytes))
+  expect(partialsIn(await readdir(directory))).toEqual([])
+})
+
+test("link support is probed once per destination, not once per receive", async () => {
+  const directory = await makeDirectory()
+  const one = new TextEncoder().encode("one")
+  const two = new TextEncoder().encode("two")
+  await receiveToFile(once(one), optionsFor(directory, "one.txt", one))
+  await receiveToFile(once(two), optionsFor(directory, "two.txt", two))
+  // One probe link for the destination plus one publish link per receive.
+  expect(linkCalls).toBe(3)
+})
+
+test("a name taken during streaming is retried under the resolver's next name", async () => {
+  const directory = await makeDirectory()
+  const bytes = new TextEncoder().encode("raced payload")
+  async function* gated(): AsyncGenerator<Uint8Array> {
+    // Another process wins the resolved name while the bytes stream in.
+    await writeFile(join(directory, "race.txt"), "someone else")
+    yield bytes
+  }
+  let resolutions = 0
+  const result = await receiveToFile(gated(), {
+    ...optionsFor(directory, "race.txt", bytes),
+    resolveName: async () => {
+      resolutions += 1
+      return "race (1).txt"
+    },
+  })
+  expect(result.name).toBe("race (1).txt")
+  expect(resolutions).toBe(1)
+  expect(await readFile(join(directory, "race.txt"), "utf8")).toBe("someone else")
+  expect(Array.from(await readFile(join(directory, "race (1).txt")))).toEqual(Array.from(bytes))
+  expect(partialsIn(await readdir(directory))).toEqual([])
+})
+
+test("publish retries stop at the attempt bound when every resolved name is taken", async () => {
+  const directory = await makeDirectory()
+  await writeFile(join(directory, "stuck.txt"), "occupant")
+  const bytes = new TextEncoder().encode("never published")
+  let resolutions = 0
+  await expect(
+    receiveToFile(once(bytes), {
+      ...optionsFor(directory, "stuck.txt", bytes),
+      resolveName: async () => {
+        resolutions += 1
+        return "stuck.txt"
+      },
+    }),
+  ).rejects.toMatchObject({ code: "EEXIST" })
+  // Ten publish attempts in total: the first try plus nine re-resolutions.
+  expect(resolutions).toBe(9)
+  expect(await readFile(join(directory, "stuck.txt"), "utf8")).toBe("occupant")
+  expect(partialsIn(await readdir(directory))).toEqual([])
 })
 
 test("previewSavedName returns null for names the sink would reject, and honours the byte bound", () => {

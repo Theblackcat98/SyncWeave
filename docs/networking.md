@@ -129,10 +129,13 @@ listener caps concurrent handshakes (4), so stalled peers cannot wedge it.
 - **Paths.** The destination directory is resolved with `realpath`. The final name
   must be a single component inside it.
 - **No overwrite.** Collisions are renamed `name (1).ext`, `name (2).ext`, and so
-  on. Publication uses `link(2)`, which fails rather than replace an existing
-  file. If another file takes the chosen name after the check and before
-  publication, the transfer fails; it is not retried with a new name yet
-  (see known-limitations).
+  on. Publication uses `link(2)` where the filesystem supports hard links
+  (probed once per destination), and falls back to creating the final file
+  exclusively and copying the verified bytes on filesystems that do not
+  (for example exFAT or SMB mounts). Either way it fails rather than replace
+  an existing file. If another file takes the chosen name after the check and
+  before publication, the name is re-resolved and publication is retried
+  under the next collision name.
 - **Temporary files.** `.syncweave-<id>.partial` in the destination, created with
   `O_EXCL` and mode `0600`. Removed on failure or cancellation. A `SIGKILL` leaves
   the partial behind. At startup, SyncWeave removes leftover partials only when
